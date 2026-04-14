@@ -1,14 +1,47 @@
-# Revenium Middleware for Go
+# Revenium Go SDK
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/revenium/revenium-go-sdk.svg)](https://pkg.go.dev/github.com/revenium/revenium-go-sdk)
-[![Go 1.21+](https://img.shields.io/badge/Go-1.21%2B-00ADD8)](https://go.dev/)
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev/)
+[![Tests](https://github.com/revenium/revenium-go-sdk/actions/workflows/test.yml/badge.svg)](https://github.com/revenium/revenium-go-sdk/actions/workflows/test.yml)
 [![Documentation](https://img.shields.io/badge/docs-revenium.io-blue)](https://docs.revenium.io)
-[![Website](https://img.shields.io/badge/website-revenium.ai-blue)](https://www.revenium.ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Unified Go SDK for automatic AI usage tracking across multiple providers**
+**Go SDK for automatic AI usage metering, cost tracking, and analytics across 13 providers.**
 
-A production-grade Go SDK that integrates with OpenAI, Azure OpenAI, Anthropic (incl. Bedrock), Google (GenAI + Vertex AI), Perplexity, LiteLLM, fal.ai, Runway, Ollama, Groq, and Grok (xAI) to provide automatic usage tracking, billing analytics, and metadata collection. Multi-module layout so consumers pull only the providers they need. Consistent `Initialize()` / `GetClient()` API across every module.
+Revenium wraps your existing AI provider clients (OpenAI, Anthropic, Google, etc.) and sends metering data asynchronously to the Revenium platform without blocking or altering your API calls. Each provider is its own Go module -- install only what you need.
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Supported Providers](#supported-providers)
+- [Installation](#installation)
+- [Authentication](#authentication)
+- [Quick Start](#quick-start)
+- [Provider Guides](#provider-guides)
+- [Streaming](#streaming-example--openai)
+- [Error Handling](#error-handling-pattern)
+- [Usage Metadata & Context](#usage-metadata--context)
+- [Tool Metering](#tool-metering)
+- [Job Outcomes](#job-outcomes)
+- [API Reference](#api-reference)
+- [Configuration Reference](#configuration-options)
+- [Troubleshooting](#troubleshooting)
+- [Data & Privacy](#data--privacy)
+- [Versioning & Stability](#versioning--stability)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Examples](#examples)
+- [Contributing](#contributing)
+
+## How It Works
+
+1. You call `Initialize()` once at startup to configure the middleware
+2. `GetClient()` returns a wrapped provider client with the same API as the upstream SDK
+3. Every API call is intercepted to collect usage metrics (tokens, latency, model, cost)
+4. Metrics are sent asynchronously via goroutines -- your request path is never blocked
+5. If metering fails, errors are logged and swallowed (configurable via `REVENIUM_FAIL_SILENT`)
+
+Clients returned by `GetClient()` are safe for concurrent use. Call `Initialize()` once; use the client from any goroutine.
 
 ## Features
 
@@ -42,32 +75,44 @@ A production-grade Go SDK that integrates with OpenAI, Azure OpenAI, Anthropic (
 | Tool Metering    | `github.com/revenium/revenium-go-sdk/core/metering`    | `ToolEventBuilder` / `MeteringClient.SendToolEvent()`     |
 | Job Outcomes     | `github.com/revenium/revenium-go-sdk/core/jobs`        | `JobClient.ReportJobOutcome()` / `ListJobs()` / etc.      |
 
-## Getting Started
-
-### Installation
+## Installation
 
 ```bash
-# Install only the providers you need
 go get github.com/revenium/revenium-go-sdk/openai
 go get github.com/revenium/revenium-go-sdk/anthropic
-go get github.com/revenium/revenium-go-sdk/litellm
-go get github.com/revenium/revenium-go-sdk/fal
+go get github.com/revenium/revenium-go-sdk/google
 ```
 
-Each provider module pulls its own upstream SDK (`openai-go`, `anthropic-sdk-go`, `genai`, etc.) transitively.
+Each provider module pulls `core` and its upstream SDK transitively. Install only the providers you need.
 
-### Configuration
+**Requirements:** Go 1.22+
 
-Create a `.env` file in your project root:
+## Authentication
+
+The SDK requires a Revenium API key plus your provider API key(s). The recommended approach is environment variables, but you can also configure programmatically.
+
+**Via environment variables** (recommended):
 
 ```env
-REVENIUM_METERING_API_KEY=hak_your_revenium_api_key_here
+REVENIUM_METERING_API_KEY=hak_your_api_key
 REVENIUM_METERING_BASE_URL=https://api.revenium.ai
+OPENAI_API_KEY=sk-your-openai-key
 ```
 
-Plus the API key for your chosen provider (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+**Via options:**
 
-### Quick Start — OpenAI
+```go
+reveniumopenai.Initialize(
+    reveniumopenai.WithReveniumAPIKey("hak_your_api_key"),
+    reveniumopenai.WithOpenAIAPIKey("sk-your-openai-key"),
+)
+```
+
+The SDK also supports automatic `.env` file loading via `core.LoadEnvFiles()`.
+
+## Quick Start
+
+### OpenAI
 
 ```go
 package main
@@ -101,179 +146,193 @@ func main() {
 }
 ```
 
-### Quick Start — Azure OpenAI
+## Provider Guides
 
-Azure is auto-detected when `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT` are set. Same `Initialize()` / `GetClient()` API.
+### Azure OpenAI
 
-```go
-reveniumopenai.Initialize()
-client, _ := reveniumopenai.GetClient()
-// client.Chat().Completions().New(...) — model is the Azure deployment name
-```
+Azure is auto-detected when `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT` are set. Same `Initialize()` / `GetClient()` API -- the model field should be the Azure deployment name.
 
-### Quick Start — Anthropic
+### Anthropic
 
 ```go
 package main
 
 import (
     "context"
+    "log"
+
     anthropic "github.com/anthropics/anthropic-sdk-go"
     reveniumanthropic "github.com/revenium/revenium-go-sdk/anthropic"
 )
 
 func main() {
-    reveniumanthropic.Initialize()
-    client, _ := reveniumanthropic.GetClient()
+    if err := reveniumanthropic.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+    client, err := reveniumanthropic.GetClient()
+    if err != nil {
+        log.Fatal(err)
+    }
     defer client.Close()
 
-    msg, _ := client.Messages().CreateMessage(context.Background(), anthropic.MessageNewParams{
+    msg, err := client.Messages().CreateMessage(context.Background(), anthropic.MessageNewParams{
         Model:     "claude-sonnet-4-20250514",
         MaxTokens: 1024,
         Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Hello!"))},
     })
+    if err != nil {
+        log.Fatal(err)
+    }
     _ = msg
 }
 ```
 
 Bedrock is auto-detected when `AWS_BEDROCK_ENABLED=true` along with the AWS credentials.
 
-### Quick Start — Google GenAI / Vertex AI
+### Google GenAI / Vertex AI
 
 ```go
 package main
 
 import (
     "context"
+    "log"
+
     reveniumgoogle "github.com/revenium/revenium-go-sdk/google"
     "google.golang.org/genai"
 )
 
 func main() {
-    reveniumgoogle.Initialize()
-    client, _ := reveniumgoogle.GetClient()
+    if err := reveniumgoogle.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+    client, err := reveniumgoogle.GetClient()
+    if err != nil {
+        log.Fatal(err)
+    }
     defer client.Close()
 
-    resp, _ := client.Models().GenerateContent(
+    resp, err := client.Models().GenerateContent(
         context.Background(),
         "gemini-2.0-flash",
         []*genai.Content{genai.NewContentFromText("Hello!", "user")},
         nil,
     )
+    if err != nil {
+        log.Fatal(err)
+    }
     _ = resp
 }
 ```
 
 Vertex AI is auto-detected when `GOOGLE_CLOUD_PROJECT` is set (uses `GOOGLE_APPLICATION_CREDENTIALS` for auth).
 
-### Quick Start — Perplexity
+### Perplexity
 
 ```go
 package main
 
 import (
     "context"
+    "log"
+
     openai "github.com/openai/openai-go/v3"
     reveniumperplexity "github.com/revenium/revenium-go-sdk/perplexity"
 )
 
 func main() {
-    reveniumperplexity.Initialize()
-    client, _ := reveniumperplexity.GetClient()
+    if err := reveniumperplexity.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+    client, err := reveniumperplexity.GetClient()
+    if err != nil {
+        log.Fatal(err)
+    }
     defer client.Close()
 
-    resp, _ := client.Chat().Completions().New(context.Background(), openai.ChatCompletionNewParams{
+    resp, err := client.Chat().Completions().New(context.Background(), openai.ChatCompletionNewParams{
         Model:    "sonar",
         Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Hello!")},
     })
+    if err != nil {
+        log.Fatal(err)
+    }
     _ = resp
 }
 ```
 
-### Quick Start — LiteLLM
-
-The LiteLLM middleware supports runtime `Enable()` / `Disable()` and a `GetStatus()` introspection method.
+### LiteLLM
 
 ```go
 package main
 
 import (
     "context"
+    "log"
+
     reveniumlitellm "github.com/revenium/revenium-go-sdk/litellm"
 )
 
 func main() {
-    reveniumlitellm.Initialize()
-    client, _ := reveniumlitellm.GetClient()
+    if err := reveniumlitellm.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+    client, err := reveniumlitellm.GetClient()
+    if err != nil {
+        log.Fatal(err)
+    }
     defer client.Close()
 
-    resp, _ := client.Chat().Completions().New(context.Background(), reveniumlitellm.ChatCompletionRequest{
+    resp, err := client.Chat().Completions().New(context.Background(), reveniumlitellm.ChatCompletionRequest{
         Model: "openai/gpt-4o-mini",
         Messages: []reveniumlitellm.ChatMessage{
             {Role: "user", Content: "Hello!"},
         },
     })
+    if err != nil {
+        log.Fatal(err)
+    }
     _ = resp
-
-    // Toggle at runtime
-    reveniumlitellm.Disable()
-    reveniumlitellm.Enable()
-
-    status := reveniumlitellm.GetStatus()
-    _ = status // {Initialized, Enabled, HasConfig, ProxyURL}
 }
 ```
 
-### Quick Start — fal.ai
+LiteLLM also supports runtime `Enable()` / `Disable()` and `GetStatus()` for introspection.
+
+### fal.ai
 
 ```go
 package main
 
 import (
     "context"
+    "log"
+
     reveniumfal "github.com/revenium/revenium-go-sdk/fal"
 )
 
 func main() {
-    reveniumfal.Initialize()
-    client, _ := reveniumfal.GetClient()
+    if err := reveniumfal.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+    client, err := reveniumfal.GetClient()
+    if err != nil {
+        log.Fatal(err)
+    }
     defer client.Close()
 
-    // Image generation (auto-detected media type)
-    res, _ := client.Run(context.Background(),
+    result, err := client.Run(context.Background(),
         "fal-ai/flux/schnell",
         map[string]interface{}{"prompt": "a futuristic cityscape at sunset"},
         nil,
     )
-    _ = res
-
-    // Queue-based (long-running) execution
-    video, _ := client.Subscribe(context.Background(),
-        "fal-ai/kling-video/v1/standard/text-to-video",
-        map[string]interface{}{"prompt": "ocean waves crashing on rocks", "duration": "5"},
-        nil,
-    )
-    _ = video
-
-    // Streaming execution
-    events, _ := client.Stream(context.Background(),
-        "fal-ai/openrouter/llama-3",
-        map[string]interface{}{"prompt": "Explain quantum computing"},
-        nil,
-    )
-    for ev := range events {
-        _ = ev // ev.Data, ev.Partial, ev.Done, ev.Error
+    if err != nil {
+        log.Fatal(err)
     }
-
-    // Legacy typed methods still supported
-    img, _ := client.GenerateImage(context.Background(), "fal-ai/flux/schnell", &reveniumfal.FalRequest{
-        Prompt: "a cat in space",
-    })
-    _ = img
+    _ = result
 }
 ```
 
-The middleware automatically detects the media type from the endpoint ID and routes metering data to the correct Revenium endpoint. Accepts `FAL_KEY` or `FAL_API_KEY` env var.
+The fal.ai middleware automatically detects the media type (image, video, audio, chat) from the endpoint ID. Also supports `Subscribe()` for queue-based execution and `Stream()` for streaming. Accepts `FAL_KEY` or `FAL_API_KEY`.
 
 ### Streaming Example — OpenAI
 
@@ -351,17 +410,21 @@ if err != nil {
 
 The `core.ReveniumError` type wraps HTTP status, category, and an optional underlying `error`. Use `core.IsConfigError(err)`, `errors.As`, or `revErr.Type` to branch.
 
-### Quick Start — Groq / Grok / Ollama / Runway
+### Groq / Grok / Ollama / Runway
 
 All follow the same `Initialize()` / `GetClient()` / `Close()` pattern:
 
 ```go
 import reveniumgroq "github.com/revenium/revenium-go-sdk/groq"
 
-reveniumgroq.Initialize()
-client, _ := reveniumgroq.GetClient()
+if err := reveniumgroq.Initialize(); err != nil {
+    log.Fatal(err)
+}
+client, err := reveniumgroq.GetClient()
+if err != nil {
+    log.Fatal(err)
+}
 defer client.Close()
-// client.Chat().Completions().New(ctx, req)
 ```
 
 ## Usage Metadata & Context
@@ -660,29 +723,56 @@ go test -cover ./...
 go work sync
 ```
 
-## Requirements
+## Data & Privacy
 
-- Go 1.21+
-- At least one provider SDK available as a dependency of the provider module you import
+By default, the SDK transmits only usage metrics to Revenium:
+
+- Provider name and model identifier
+- Token counts (input, output, total)
+- Request latency and timing
+- Transaction identifiers and stop reasons
+
+**No prompts, responses, or API keys are sent by default.** Prompt capture is opt-in via `REVENIUM_CAPTURE_PROMPTS=true`, and when enabled, credentials are automatically sanitized before transmission.
+
+## Versioning & Stability
+
+This SDK follows [Semantic Versioning](https://semver.org/). The API is stable and ready for production use.
+
+- **Current version**: v1.x (stable)
+- **Backward compatibility**: Guaranteed within major versions
+- **Go versions**: 1.22 and 1.23 tested in CI
+- **Upstream SDKs**: Compatible with `openai-go/v3`, `anthropic-sdk-go v1.x`, `google.golang.org/genai v1.x`
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Examples
+
+For complete, runnable examples for each provider, see the [examples/](examples/) directory:
+
+- `examples/openai/` -- Chat, streaming, embeddings
+- `examples/anthropic/` -- Chat, streaming
+- `examples/google/` -- Chat, streaming
+- `examples/litellm/` -- Chat via LiteLLM proxy
+- `examples/perplexity/` -- Chat
+- `examples/fal/` -- Image generation
+- `examples/tool-metering/` -- Custom tool event reporting
+- `examples/job-metering/` -- Job outcome tracking
 
 ## Contributing
 
-Issues and PRs welcome. Run `make test-all` and `make lint-all` before submitting.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, how to add a new provider, and PR guidelines.
 
 ## Security
 
-Report security issues to security@revenium.io.
+See [SECURITY.md](SECURITY.md). Report vulnerabilities to support@revenium.io -- do not create public issues.
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+MIT -- see [LICENSE](LICENSE).
 
-## Support
+## Getting Help
 
-- **Website**: [www.revenium.ai](https://www.revenium.ai)
 - **Documentation**: [docs.revenium.io](https://docs.revenium.io)
+- **Bug Reports**: [GitHub Issues](https://github.com/revenium/revenium-go-sdk/issues)
 - **Email**: support@revenium.io
-
----
-
-**Built by Revenium**
+- **Website**: [www.revenium.ai](https://www.revenium.ai)
