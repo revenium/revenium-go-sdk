@@ -1,0 +1,65 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+        module:
+          - core
+          - openai
+          - anthropic
+          - google
+          - litellm
+          - fal
+          - runway
+          - ollama
+          - perplexity
+          - groq
+          - grok
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.module }}-
+
+      - name: Tidy
+        working-directory: ${{ matrix.module }}
+        run: go mod tidy
+
+      - name: Build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: Test
+        working-directory: ${{ matrix.module }}
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: matrix.go-version == '1.23'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.module }}
+          path: ${{ matrix.module }}/coverage.out
