@@ -1,0 +1,17 @@
+go 1.23.0
+
+toolchain go1.24.1
+
+use (
+	./anthropic
+	./core
+	./fal
+	./google
+	./grok
+	./groq
+	./litellm
+	./ollama
+	./openai
+	./perplexity
+	./runway
+)
