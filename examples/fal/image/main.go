@@ -4,37 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"log"
 
 	reveniumfal "github.com/revenium/revenium-go-sdk/fal"
 )
 
 func main() {
 	if err := reveniumfal.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumfal.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
 	result, err := client.Run(context.Background(),
 		"fal-ai/flux/schnell",
 		map[string]interface{}{
-			"prompt":     "a futuristic cityscape at sunset",
+			"prompt":     "a futuristic cityscape at sunset, cyberpunk style",
 			"image_size": "landscape_16_9",
 		},
 		nil,
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "generation error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
 	output, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Println(string(output))
+	fmt.Println("Result:", string(output))
 }

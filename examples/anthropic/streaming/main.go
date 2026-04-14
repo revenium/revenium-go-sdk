@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	reveniumanthropic "github.com/revenium/revenium-go-sdk/anthropic"
@@ -11,14 +11,11 @@ import (
 
 func main() {
 	if err := reveniumanthropic.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumanthropic.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
@@ -26,21 +23,21 @@ func main() {
 		Model:     "claude-sonnet-4-20250514",
 		MaxTokens: 1024,
 		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock("Write a haiku about Go programming")),
+			anthropic.NewUserMessage(anthropic.NewTextBlock("Write a short poem about technology.")),
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "streaming error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
 	sw := result.(*reveniumanthropic.StreamingWrapper)
+
+	fmt.Print("Response: ")
 	for sw.Next() {
 		_ = sw.Current()
 	}
 	if err := sw.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nstream error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	sw.Close()
 
@@ -48,8 +45,10 @@ func main() {
 	if msg != nil {
 		for _, block := range msg.Content {
 			if block.Type == "text" {
-				fmt.Println(block.Text)
+				fmt.Print(block.Text)
 			}
 		}
 	}
+
+	fmt.Println("\n\nStreaming complete! Usage data sent to Revenium.")
 }

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
 
 	reveniumgoogle "github.com/revenium/revenium-go-sdk/google"
 	"google.golang.org/genai"
@@ -11,28 +11,25 @@ import (
 
 func main() {
 	if err := reveniumgoogle.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumgoogle.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
 	stream := client.Models().GenerateContentStream(
 		context.Background(),
 		"gemini-2.0-flash",
-		[]*genai.Content{genai.NewContentFromText("Write a haiku about Go programming", "user")},
+		[]*genai.Content{genai.NewContentFromText("Write a short poem about technology.", "user")},
 		nil,
 	)
 
+	fmt.Print("Response: ")
 	for resp, err := range stream {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nstream error: %v\n", err)
-			os.Exit(1)
+			log.Fatal(err)
 		}
 		for _, candidate := range resp.Candidates {
 			for _, part := range candidate.Content.Parts {
@@ -43,5 +40,5 @@ func main() {
 		}
 	}
 
-	fmt.Println()
+	fmt.Println("\n\nStreaming complete! Usage data sent to Revenium.")
 }

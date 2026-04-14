@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -13,8 +14,7 @@ func main() {
 		APIKey: os.Getenv("REVENIUM_METERING_API_KEY"),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create metering client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer mc.Close()
 
@@ -22,12 +22,16 @@ func main() {
 		WithOperation("get_forecast").
 		WithDuration(245 * time.Millisecond).
 		WithSuccess(true).
-		WithAgent("my-agent").
+		WithAgent("customer-support").
+		WithOrganization("acme-corp").
 		WithTraceID("session-123").
 		Build()
 
 	mc.SendToolEvent(payload)
-
 	mc.Flush()
-	fmt.Println("Tool event sent successfully")
+
+	fmt.Println("Tool event sent successfully.")
+	fmt.Printf("Transaction ID: %s\n", payload.TransactionID)
+	fmt.Printf("Tool: %s / %s\n", payload.ToolID, payload.Operation)
+	fmt.Printf("Duration: %dms\n", payload.DurationMs)
 }

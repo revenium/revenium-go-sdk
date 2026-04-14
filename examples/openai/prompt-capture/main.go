@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 
 	openai "github.com/openai/openai-go/v3"
 	reveniumopenai "github.com/revenium/revenium-go-sdk/openai"
 )
 
 func main() {
+	os.Setenv("REVENIUM_CAPTURE_PROMPTS", "true")
+
 	if err := reveniumopenai.Initialize(); err != nil {
 		log.Fatal(err)
 	}
@@ -22,18 +25,13 @@ func main() {
 	resp, err := client.Chat().Completions().New(context.Background(), openai.ChatCompletionNewParams{
 		Model: "gpt-4o-mini",
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage("You are a helpful assistant."),
-			openai.UserMessage("Explain the concept of middleware in software architecture in 2-3 sentences."),
+			openai.UserMessage("What is the capital of France?"),
 		},
-		MaxTokens: openai.Int(500),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Println("Response:", resp.Choices[0].Message.Content)
-	fmt.Println("\nModel:", resp.Model)
-	fmt.Println("Finish reason:", resp.Choices[0].FinishReason)
-	fmt.Printf("Usage: prompt=%d completion=%d total=%d\n",
-		resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+	fmt.Println("\nPrompt and response captured for analysis.")
 }

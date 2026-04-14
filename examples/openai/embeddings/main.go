@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
 
 	openai "github.com/openai/openai-go/v3"
 	reveniumopenai "github.com/revenium/revenium-go-sdk/openai"
@@ -11,28 +11,25 @@ import (
 
 func main() {
 	if err := reveniumopenai.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumopenai.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
 	resp, err := client.Embeddings().Create(context.Background(), openai.EmbeddingNewParams{
 		Model: "text-embedding-3-small",
 		Input: openai.EmbeddingNewParamsInputUnion{
-			OfString: openai.String("The quick brown fox jumps over the lazy dog"),
+			OfString: openai.String("Revenium provides AI usage tracking and monetization."),
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "embedding error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
-	fmt.Printf("Embedding dimensions: %d\n", len(resp.Data[0].Embedding))
-	fmt.Printf("Usage tokens: %d\n", resp.Usage.TotalTokens)
+	fmt.Println("Embedding dimensions:", len(resp.Data[0].Embedding))
+	fmt.Println("Model:", resp.Model)
+	fmt.Printf("Usage: prompt=%d total=%d\n", resp.Usage.PromptTokens, resp.Usage.TotalTokens)
 }

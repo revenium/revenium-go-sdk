@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
 
 	openai "github.com/openai/openai-go/v3"
 	reveniumopenai "github.com/revenium/revenium-go-sdk/openai"
@@ -11,28 +11,25 @@ import (
 
 func main() {
 	if err := reveniumopenai.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumopenai.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
 	stream, err := client.Chat().Completions().NewStreaming(context.Background(), openai.ChatCompletionNewParams{
 		Model: "gpt-4o-mini",
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.UserMessage("Write a haiku about Go programming"),
+			openai.UserMessage("Write a short poem about technology."),
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "streaming error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
+	fmt.Print("Response: ")
 	for stream.Next() {
 		chunk := stream.Current()
 		if len(chunk.Choices) > 0 {
@@ -40,13 +37,11 @@ func main() {
 		}
 	}
 	if err := stream.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nstream error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	if err := stream.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nclose error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
-	fmt.Println()
+	fmt.Println("\n\nStreaming complete! Usage data sent to Revenium.")
 }

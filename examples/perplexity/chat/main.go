@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"log"
 
 	openai "github.com/openai/openai-go/v3"
 	reveniumperplexity "github.com/revenium/revenium-go-sdk/perplexity"
@@ -11,27 +11,27 @@ import (
 
 func main() {
 	if err := reveniumperplexity.Initialize(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-
 	client, err := reveniumperplexity.GetClient()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get client: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer client.Close()
 
 	resp, err := client.Chat().Completions().New(context.Background(), openai.ChatCompletionNewParams{
 		Model: "sonar",
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.UserMessage("What is the capital of France?"),
+			openai.UserMessage("What are the key differences between REST and GraphQL APIs?"),
 		},
+		MaxTokens: openai.Int(500),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "completion error: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
-	fmt.Println(resp.Choices[0].Message.Content)
+	fmt.Println("Response:", resp.Choices[0].Message.Content)
+	fmt.Println("\nModel:", resp.Model)
+	fmt.Printf("Usage: prompt=%d completion=%d total=%d\n",
+		resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
 }

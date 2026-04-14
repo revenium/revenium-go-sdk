@@ -749,7 +749,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 For complete, runnable examples for each provider, see the [examples/](examples/) directory:
 
-- `examples/openai/` -- Chat, streaming, embeddings
+- `examples/openai/` -- Chat, streaming, embeddings, metadata, prompt capture
 - `examples/anthropic/` -- Chat, streaming
 - `examples/google/` -- Chat, streaming
 - `examples/litellm/` -- Chat via LiteLLM proxy
