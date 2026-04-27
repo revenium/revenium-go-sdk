@@ -620,7 +620,7 @@ Environment variables picked up automatically for distributed tracing and analyt
 
 | Variable                     | Required | Description                                                |
 | ---------------------------- | -------- | ---------------------------------------------------------- |
-| `REVENIUM_METERING_API_KEY`  | Yes      | Revenium API key (starts with `hak_`)                      |
+| `REVENIUM_METERING_API_KEY`  | Yes      | Revenium API key (starts with `hak_` or `rev_`)            |
 | `REVENIUM_METERING_BASE_URL` | No       | Revenium API endpoint (default: `https://api.revenium.ai`) |
 | `REVENIUM_DEBUG`             | No       | Enable debug logging (`true`/`false`)                      |
 | `REVENIUM_PRINT_SUMMARY`     | No       | Terminal summary (`true`, `human`, `json`, `false`)        |
@@ -668,7 +668,7 @@ Environment variables picked up automatically for distributed tracing and analyt
 1. Verify environment variables are set correctly (`.env` in project root or exported in shell).
 2. Enable debug logging: `REVENIUM_DEBUG=true`.
 3. Check console for `[Revenium DEBUG]` / `[Revenium INFO]` log messages.
-4. Verify your `REVENIUM_METERING_API_KEY` is valid (starts with `hak_`).
+4. Verify your `REVENIUM_METERING_API_KEY` is valid (starts with `hak_` or `rev_`).
 
 ### `middleware not initialized` error
 

@@ -67,7 +67,7 @@ func ValidateReveniumConfig(cfg *ReveniumConfig) error {
 		return NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
 	}
 	if !IsValidAPIKeyFormat(cfg.APIKey) {
-		return NewConfigError("REVENIUM_METERING_API_KEY must start with 'hak_'", nil)
+		return NewConfigError("REVENIUM_METERING_API_KEY must start with 'hak_' or 'rev_'", nil)
 	}
 	return nil
 }

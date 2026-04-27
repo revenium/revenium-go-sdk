@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-04-27
+
+### Added
+
+- **Runway video generation example** in `examples/runway/video/`
+
+### Changed
+
+- API key validation now accepts both `hak_` and `rev_` prefixes
+
+### Fixed
+
+- Error handling in Runway example for `json.MarshalIndent`
+- Assertion robustness in LiteLLM config test
+
 ## [1.0.0] - 2026-04-14
 
 ### Added
@@ -36,4 +51,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-module layout** so consumers pull only the providers they need
 - **CI/CD pipeline** with GitHub Actions for automated testing across all modules
 
+[1.0.1]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.1
 [1.0.0]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.0
