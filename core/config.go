@@ -19,11 +19,11 @@ func GetEnvOrDefault(key, defaultValue string) string {
 
 // IsValidAPIKeyFormat checks if the API key has a valid format
 func IsValidAPIKeyFormat(key string) bool {
-	// Revenium API keys should start with "hak_"
 	if len(key) < 4 {
 		return false
 	}
-	return key[:4] == "hak_"
+	prefix := key[:4]
+	return prefix == "hak_" || prefix == "rev_"
 }
 
 // NormalizeReveniumBaseURL normalizes the base URL to a consistent format.

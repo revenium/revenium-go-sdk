@@ -36,6 +36,11 @@ func TestIsValidAPIKeyFormat(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "valid rev_ key",
+			key:      "rev_1234567890",
+			expected: true,
+		},
+		{
 			name:     "invalid prefix",
 			key:      "sk_1234567890",
 			expected: false,

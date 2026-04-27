@@ -27,7 +27,7 @@ func TestValidateConfig_RequiresValidAPIKeyFormat(t *testing.T) {
 	err := cfg.Validate()
 	assert.Error(t, err)
 	assert.True(t, core.IsConfigError(err))
-	assert.Contains(t, err.Error(), "hak_")
+	assert.Contains(t, err.Error(), "must start with 'hak_' or 'rev_'")
 }
 
 func TestValidateConfig_RequiresLiteLLMProxyURL(t *testing.T) {
