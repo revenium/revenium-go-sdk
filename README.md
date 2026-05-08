@@ -25,6 +25,7 @@ Revenium wraps your existing AI provider clients (OpenAI, Anthropic, Google, etc
 - [Job Outcomes](#job-outcomes)
 - [API Reference](#api-reference)
 - [Configuration Reference](#configuration-options)
+- [Cost Controls / Enforcement](#cost-controls--enforcement)
 - [Troubleshooting](#troubleshooting)
 - [Data & Privacy](#data--privacy)
 - [Versioning & Stability](#versioning--stability)
@@ -660,6 +661,135 @@ Environment variables picked up automatically for distributed tracing and analyt
 | `GROQ_BASE_URL`                  | Groq              | Groq base URL (default: `https://api.groq.com/openai/v1`) |
 | `XAI_API_KEY`                    | Grok              | xAI API key                                         |
 | `XAI_BASE_URL`                   | Grok              | xAI base URL (default: `https://api.x.ai/v1`)       |
+
+## Cost Controls / Enforcement
+
+Per-call enforcement blocks outgoing provider requests when a subscriber has a breached `BLOCK` cost control configured in Revenium. The Google and OpenAI middleware gate both sync and streaming paths; other providers will adopt the same gate in follow-up work (unified exception + Anthropic wiring + Node/Python/Go env-var normalization).
+
+> **Terminology note:** The customer-facing entity is called a **cost control**, served by the backend at `/v2/api/ai/cost-controls`. This SDK polls a separate compiled-rules feed at `/v2/api/ai/enforcement-rules/{teamId}` and is unaffected by changes to the CRUD path — no SDK upgrade is required.
+
+### Environment variables
+
+| Variable                          | Required                         | Description                                                                                      |
+| --------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `REVENIUM_METERING_API_KEY`       | Yes                              | Revenium API key (starts with `hak_`). The `_METERING_` infix is load-bearing — not `REVENIUM_API_KEY`. |
+| `REVENIUM_TEAM_ID`                | Yes for enforcement              | Hashed team ID. If unset, the engine starts dormant (warns once, skips rule fetch) and all provider calls pass through. |
+| `REVENIUM_ENFORCEMENT_BASE_URL`   | No                               | Base URL for the enforcement API. Falls back to `REVENIUM_METERING_BASE_URL` when unset. Use `https://api.dev.hcapp.io/profitstream` for dev. |
+
+The engine refuses to start if the resolved base URL is not an absolute `http(s)://` URL with a host — a safety check so a misconfigured env var cannot ship the API key to an unexpected scheme.
+
+### How it works
+
+Each provider's `Initialize()` / `NewReveniumX()` constructor calls `enforcement.Start(baseURL, apiKey, teamID)`, which boots a background poller on `/v2/api/ai/enforcement-rules/{teamId}` every 30s ± 5s jitter. Fetched rules are cached in memory; a `204 No Content` response caches an empty ruleset.
+
+Before every provider call, the middleware builds an `EvalContext` from the request (subscriber from `core.WithSubscriber`, model from the request params, provider/productName where applicable) and calls `enforcement.Check(ctx)`. The evaluator:
+
+- skips rules where `breached == false`;
+- logs a warning and continues past rules where `shadowMode == true` or `action ∈ {WARN_ONLY, THROTTLE}` — these are observation-only client-side, server still enforces server-side throttling;
+- returns `*ErrCostLimitExceeded` on the first matching `BLOCK` cost control.
+
+The engine fails open: fetch errors, network outages, missing team IDs, and an unreachable Revenium API all result in `Check` returning `nil` (request passes). Enforcement errors never bubble to user code as metering failures.
+
+### Error shape
+
+```go
+type ErrCostLimitExceeded struct {
+    RuleID       string       // numeric server ruleId, stringified for Node SDK parity
+    RuleName     string       // server-provided human-readable rule name
+    Threshold    float64      // rule limit
+    CurrentValue float64      // subscriber's metered value at block time
+    PeriodType   string       // DAILY / WEEKLY / MONTHLY / QUARTERLY
+    Action       Action       // always BLOCK today; retained for future hard-stop actions
+    Context      EvalContext  // subscriberId / productName / model / provider at call time
+}
+```
+
+Recover the structured fields with `errors.As`:
+
+```go
+resp, err := client.Chat().Completions().New(ctx, params)
+if err != nil {
+    var ece *enforcement.ErrCostLimitExceeded
+    if errors.As(err, &ece) {
+        log.Printf("blocked by rule %s: $%.2f of $%.2f %s limit",
+            ece.RuleID, ece.CurrentValue, ece.Threshold, ece.PeriodType)
+        return // or degrade gracefully
+    }
+    return // not an enforcement error — handle as usual
+}
+```
+
+### Rule.Action enum
+
+```go
+const (
+    ActionBlock    Action = "BLOCK"     // reject the call with ErrCostLimitExceeded
+    ActionThrottle Action = "THROTTLE"  // observed client-side; server applies the rate limit
+    ActionWarnOnly Action = "WARN_ONLY" // observed client-side; log only
+)
+```
+
+`shadowMode: true` on any rule (including `action: BLOCK`) downgrades it to observation-only for this SDK — the rule is logged but never throws. This matches the Node SDK semantics so a rule can be safely rolled out in shadow mode before flipping to enforcement.
+
+### End-to-end example
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "log"
+
+    oai "github.com/openai/openai-go/v3"
+    "github.com/revenium/revenium-go-sdk/core"
+    "github.com/revenium/revenium-go-sdk/core/enforcement"
+    revopenai "github.com/revenium/revenium-go-sdk/openai"
+)
+
+func main() {
+    if err := revopenai.Initialize(); err != nil {
+        log.Fatal(err)
+    }
+
+    client, _ := revopenai.GetClient()
+
+    ctx := core.WithSubscriber(context.Background(), &core.Subscriber{
+        ID:    "samuel.combs@revenium.io",
+        Email: "samuel.combs@revenium.io",
+    })
+
+    _, err := client.Chat().Completions().New(ctx, oai.ChatCompletionNewParams{
+        Model:    "gpt-4o-mini",
+        Messages: []oai.ChatCompletionMessageParamUnion{oai.UserMessage("hello")},
+    })
+
+    var ece *enforcement.ErrCostLimitExceeded
+    switch {
+    case errors.As(err, &ece):
+        log.Printf("cost limit hit: rule=%s current=$%.2f threshold=$%.2f",
+            ece.RuleID, ece.CurrentValue, ece.Threshold)
+    case err != nil:
+        log.Printf("provider error: %v", err)
+    }
+}
+```
+
+### Scope safety
+
+A cost control with every scope field (`subscriberId` / `productName` / `model` / `provider`) empty would act as a team-wide global block. The evaluator skips such cost controls with a warning rather than letting one misconfigured API response deny service across every tenant.
+
+### End-to-end smoke test
+
+`scripts/e2e-enforcement/` ships a 6-phase smoke that exercises live dev, exception contract, shadow mode, fail-open paths, and the wrapped provider block. Set `DEV_API_BASE_URL` / `DEV_API_KEY` / `DEV_TEAM_ID` / `DEV_USER_EMAIL` in `~/revenium/.env`, then:
+
+```bash
+set -a ; source ~/revenium/.env ; set +a
+cd scripts/e2e-enforcement
+go run .
+```
+
+Results land in `scripts/e2e-enforcement/.e2e-report.md`. Exit code is non-zero if any phase fails.
 
 ## Troubleshooting
 

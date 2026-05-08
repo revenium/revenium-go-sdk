@@ -7,9 +7,47 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 	"google.golang.org/genai"
 )
+
+// enforcementBaseURL returns the base URL used for enforcement rule fetches,
+// falling back to the metering BaseURL when EnforcementBaseURL is unset.
+func enforcementBaseURL(rc *core.ReveniumConfig) string {
+	if rc == nil {
+		return ""
+	}
+	if rc.EnforcementBaseURL != "" {
+		return rc.EnforcementBaseURL
+	}
+	return rc.BaseURL
+}
+
+// buildEvalContext assembles the evaluation criteria for a pre-call
+// enforcement check. Subscriber identity comes from the request context
+// (core.WithSubscriber); productName is read from the usage metadata when
+// present. The provider string matches the metering payload's provider tag
+// so rules scoped to a provider apply consistently on both surfaces.
+func buildEvalContext(ctx context.Context, model string, provider Provider) enforcement.EvalContext {
+	ec := enforcement.EvalContext{
+		Model:    model,
+		Provider: provider.String(),
+	}
+	if sub := core.GetSubscriber(ctx); sub != nil {
+		if sub.ID != "" {
+			ec.SubscriberID = sub.ID
+		} else if sub.Email != "" {
+			ec.SubscriberID = sub.Email
+		}
+	}
+	if md := core.GetUsageMetadata(ctx); md != nil {
+		if pn, ok := md["productName"].(string); ok {
+			ec.ProductName = pn
+		}
+	}
+	return ec
+}
 
 type ReveniumGoogle struct {
 	client   *genai.Client
@@ -104,6 +142,8 @@ func Initialize(opts ...Option) error {
 		metering: mc,
 	}
 
+	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
+
 	initialized = true
 	core.Info("Revenium middleware initialized successfully with provider: %s", provider.String())
 	return nil
@@ -147,6 +187,8 @@ func NewReveniumGoogle(cfg *Config) (*ReveniumGoogle, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
 
 	return &ReveniumGoogle{
 		client:   genaiClient,
@@ -215,6 +257,11 @@ func (m *ModelsInterface) GenerateContent(
 
 	core.Debug("GenerateContent called with model: %s", model)
 
+	if err := enforcement.Check(buildEvalContext(ctx, model, m.provider)); err != nil {
+		core.Debug("GenerateContent blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	requestTime := time.Now()
 
 	resp, err := m.client.Models.GenerateContent(ctx, model, contents, config)
@@ -251,6 +298,13 @@ func (m *ModelsInterface) GenerateContentStream(
 	metadata := core.GetUsageMetadata(ctx)
 
 	core.Debug("GenerateContentStream called with model: %s", model)
+
+	if err := enforcement.Check(buildEvalContext(ctx, model, m.provider)); err != nil {
+		core.Debug("GenerateContentStream blocked by enforcement: %v", err)
+		return func(yield func(*genai.GenerateContentResponse, error) bool) {
+			yield(nil, err)
+		}
+	}
 
 	requestTime := time.Now()
 

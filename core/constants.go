@@ -9,9 +9,10 @@ const (
 	EnvOrgID          = "REVENIUM_ORGANIZATION_ID"
 	EnvProductID      = "REVENIUM_PRODUCT_ID"
 	EnvLogLevel       = "REVENIUM_LOG_LEVEL"
-	EnvTeamID         = "REVENIUM_TEAM_ID"
-	EnvDebug          = "REVENIUM_DEBUG"
-	EnvVerboseStartup = "REVENIUM_VERBOSE_STARTUP"
+	EnvTeamID             = "REVENIUM_TEAM_ID"
+	EnvEnforcementBaseURL = "REVENIUM_ENFORCEMENT_BASE_URL"
+	EnvDebug              = "REVENIUM_DEBUG"
+	EnvVerboseStartup     = "REVENIUM_VERBOSE_STARTUP"
 
 	EnvCapturePrompts = "REVENIUM_CAPTURE_PROMPTS"
 	EnvMaxPromptSize  = "REVENIUM_MAX_PROMPT_SIZE"
