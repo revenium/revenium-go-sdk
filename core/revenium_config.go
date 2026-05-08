@@ -3,20 +3,21 @@ package core
 import "os"
 
 type ReveniumConfig struct {
-	APIKey         string
-	BaseURL        string
-	OrgID          string
-	ProductID      string
-	TeamID         string
-	LogLevel       string
-	Debug          bool
-	VerboseStartup bool
+	APIKey             string
+	BaseURL            string
+	EnforcementBaseURL string
+	OrgID              string
+	ProductID          string
+	TeamID             string
+	LogLevel           string
+	Debug              bool
+	VerboseStartup     bool
 }
 
 func LoadReveniumConfig() *ReveniumConfig {
 	baseURL := GetEnvOrDefault(EnvBaseURL, DefaultBaseURL)
 
-	return &ReveniumConfig{
+	cfg := &ReveniumConfig{
 		APIKey:         os.Getenv(EnvAPIKey),
 		BaseURL:        NormalizeReveniumBaseURL(baseURL),
 		OrgID:          os.Getenv(EnvOrgID),
@@ -26,6 +27,10 @@ func LoadReveniumConfig() *ReveniumConfig {
 		Debug:          os.Getenv(EnvDebug) == "true" || os.Getenv(EnvDebug) == "1",
 		VerboseStartup: os.Getenv(EnvVerboseStartup) == "true" || os.Getenv(EnvVerboseStartup) == "1",
 	}
+	if enforcementURL := os.Getenv(EnvEnforcementBaseURL); enforcementURL != "" {
+		cfg.EnforcementBaseURL = NormalizeReveniumBaseURL(enforcementURL)
+	}
+	return cfg
 }
 
 func MergeReveniumConfig(programmatic, env *ReveniumConfig) *ReveniumConfig {
@@ -37,6 +42,9 @@ func MergeReveniumConfig(programmatic, env *ReveniumConfig) *ReveniumConfig {
 	}
 	if programmatic.BaseURL == "" {
 		programmatic.BaseURL = env.BaseURL
+	}
+	if programmatic.EnforcementBaseURL == "" {
+		programmatic.EnforcementBaseURL = env.EnforcementBaseURL
 	}
 	if programmatic.OrgID == "" {
 		programmatic.OrgID = env.OrgID

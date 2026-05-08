@@ -11,8 +11,45 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
+
+// enforcementBaseURL returns the base URL used for enforcement rule fetches,
+// falling back to the metering BaseURL when EnforcementBaseURL is unset.
+func enforcementBaseURL(rc *core.ReveniumConfig) string {
+	if rc == nil {
+		return ""
+	}
+	if rc.EnforcementBaseURL != "" {
+		return rc.EnforcementBaseURL
+	}
+	return rc.BaseURL
+}
+
+// buildEvalContext assembles the evaluation criteria for a pre-call
+// enforcement check. Subscriber identity comes from the request context
+// (core.WithSubscriber); productName is read from the usage metadata when
+// present. The provider string matches the metering payload's provider tag.
+func buildEvalContext(ctx context.Context, model string, provider string) enforcement.EvalContext {
+	ec := enforcement.EvalContext{
+		Model:    model,
+		Provider: provider,
+	}
+	if sub := core.GetSubscriber(ctx); sub != nil {
+		if sub.ID != "" {
+			ec.SubscriberID = sub.ID
+		} else if sub.Email != "" {
+			ec.SubscriberID = sub.Email
+		}
+	}
+	if md := core.GetUsageMetadata(ctx); md != nil {
+		if pn, ok := md["productName"].(string); ok {
+			ec.ProductName = pn
+		}
+	}
+	return ec
+}
 
 type ReveniumOpenAI struct {
 	client   openai.Client
@@ -70,6 +107,8 @@ func Initialize(opts ...Option) error {
 		metering: mc,
 	}
 
+	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
+
 	initialized = true
 	core.Info("Revenium middleware initialized successfully with provider: %s", provider)
 	return nil
@@ -112,6 +151,8 @@ func NewReveniumOpenAI(cfg *Config) (*ReveniumOpenAI, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
 
 	return &ReveniumOpenAI{
 		client:   openaiClient,
@@ -261,6 +302,15 @@ type CompletionsInterface struct {
 func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatCompletionNewParams) (*openai.ChatCompletion, error) {
 	metadata := core.GetUsageMetadata(ctx)
 
+	providerTag := "OPENAI"
+	if c.provider == ProviderAzure {
+		providerTag = "AZURE"
+	}
+	if err := enforcement.Check(buildEvalContext(ctx, string(params.Model), providerTag)); err != nil {
+		core.Debug("Chat.Completions.New blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	switch c.provider {
 	case ProviderOpenAI:
 		return c.createCompletionOpenAI(ctx, params, metadata)
@@ -273,6 +323,15 @@ func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatComple
 
 func (c *CompletionsInterface) NewStreaming(ctx context.Context, params openai.ChatCompletionNewParams) (*StreamingWrapper, error) {
 	metadata := core.GetUsageMetadata(ctx)
+
+	providerTag := "OPENAI"
+	if c.provider == ProviderAzure {
+		providerTag = "AZURE"
+	}
+	if err := enforcement.Check(buildEvalContext(ctx, string(params.Model), providerTag)); err != nil {
+		core.Debug("Chat.Completions.NewStreaming blocked by enforcement: %v", err)
+		return nil, err
+	}
 
 	switch c.provider {
 	case ProviderOpenAI:
