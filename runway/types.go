@@ -102,8 +102,8 @@ func DefaultPollingConfig() *PollingConfig {
 
 // UsageMetadata represents metadata to be sent with metering data
 type UsageMetadata struct {
-	OrganizationID      string                 `json:"organizationId,omitempty"`
-	ProductID           string                 `json:"productId,omitempty"`
+	OrganizationID      string                 `json:"organizationName,omitempty"`
+	ProductID           string                 `json:"productName,omitempty"`
 	TaskType            string                 `json:"taskType,omitempty"`
 	Agent               string                 `json:"agent,omitempty"`
 	SubscriptionID      string                 `json:"subscriptionId,omitempty"`

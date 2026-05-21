@@ -6,8 +6,8 @@ import (
 )
 
 var stringFields = map[string]*func(*MeteringPayload) *string{
-	"organizationId":      strSetter(func(p *MeteringPayload) *string { return &p.OrganizationID }),
-	"productId":           strSetter(func(p *MeteringPayload) *string { return &p.ProductID }),
+	"organizationId":      strSetter(func(p *MeteringPayload) *string { return &p.OrganizationName }),
+	"productId":           strSetter(func(p *MeteringPayload) *string { return &p.ProductName }),
 	"organizationName":    strSetter(func(p *MeteringPayload) *string { return &p.OrganizationName }),
 	"productName":         strSetter(func(p *MeteringPayload) *string { return &p.ProductName }),
 	"taskType":            strSetter(func(p *MeteringPayload) *string { return &p.TaskType }),

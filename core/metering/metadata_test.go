@@ -9,8 +9,8 @@ import (
 func TestApplyMetadata_StringFields(t *testing.T) {
 	p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
 	ApplyMetadata(p, map[string]interface{}{
-		"organizationId":      "org-123",
-		"productId":           "prod-456",
+		"organizationName":      "org-123",
+		"productName":           "prod-456",
 		"taskType":            "summarize",
 		"agent":               "my-agent",
 		"subscriptionId":      "sub-789",
@@ -26,8 +26,8 @@ func TestApplyMetadata_StringFields(t *testing.T) {
 		"transactionId":       "custom-tx",
 	})
 
-	assert.Equal(t, "org-123", p.OrganizationID)
-	assert.Equal(t, "prod-456", p.ProductID)
+	assert.Equal(t, "org-123", p.OrganizationName)
+	assert.Equal(t, "prod-456", p.ProductName)
 	assert.Equal(t, "summarize", p.TaskType)
 	assert.Equal(t, "my-agent", p.Agent)
 	assert.Equal(t, "sub-789", p.SubscriptionID)
