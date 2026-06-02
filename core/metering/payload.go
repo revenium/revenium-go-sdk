@@ -42,8 +42,8 @@ type MeteringPayload struct {
 
 	OrganizationName string `json:"organizationName,omitempty"`
 	ProductName      string `json:"productName,omitempty"`
-	OrganizationID   string `json:"organizationId,omitempty"`
-	ProductID        string `json:"productId,omitempty"`
+	OrganizationID   string `json:"-"` // Deprecated: BACK-1456 — wire emits organizationName via OrganizationName.
+	ProductID        string `json:"-"` // Deprecated: BACK-1456 — wire emits productName via ProductName.
 	TaskType         string `json:"taskType,omitempty"`
 	Agent            string `json:"agent,omitempty"`
 	SubscriptionID   string `json:"subscriptionId,omitempty"`

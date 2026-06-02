@@ -63,8 +63,8 @@ func TestBuildVideoMeteringPayload_AppliesUsageMetadata(t *testing.T) {
 	}
 	payload := buildVideoMeteringPayload(result, md, false, time.Now())
 	require.NotNil(t, payload)
-	assert.Equal(t, "org-1", payload.OrganizationID)
-	assert.Equal(t, "prod-1", payload.ProductID)
+	assert.Equal(t, "org-1", payload.OrganizationName)
+	assert.Equal(t, "prod-1", payload.ProductName)
 	assert.Equal(t, "trace-1", payload.TraceID)
 }
 
@@ -97,8 +97,8 @@ func TestUsageMetadataToMap_PopulatesAllFields(t *testing.T) {
 	}
 
 	out := usageMetadataToMap(md)
-	assert.Equal(t, "org", out["organizationId"])
-	assert.Equal(t, "prod", out["productId"])
+	assert.Equal(t, "org", out["organizationName"])
+	assert.Equal(t, "prod", out["productName"])
 	assert.Equal(t, "video-gen", out["taskType"])
 	assert.Equal(t, "trace-1", out["traceId"])
 	assert.Equal(t, "name-x", out["traceName"])

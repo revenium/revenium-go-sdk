@@ -1,3 +1,13 @@
+## Unreleased
+
+### Breaking changes
+
+- BACK-1456: Wire-key rename. The metering payload now emits `organizationName` and `productName` only.
+  - `MeteringPayload.OrganizationID` and `.ProductID` Go fields are retained for source-compat but tagged `json:"-"` so they no longer reach the wire (backend silently dropped the old wire keys per PR #2954). Migration: read/write `.OrganizationName` / `.ProductName` instead.
+  - `runway/UsageMetadata` keeps its Go field names `OrganizationID`/`ProductID`, but JSON tags now emit `organizationName`/`productName`.
+  - Legacy input keys `organizationId`/`productId` in caller-supplied `metadata` maps are still accepted and routed to the new fields for backward compatibility.
+  - LiteLLM headers `X-Revenium-Organization-Id`/`X-Revenium-Product-Id` now map to `organizationName`/`productName`.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.

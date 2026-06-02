@@ -9,9 +9,9 @@ import (
 var headerMetadataFields = map[string]string{
 	"X-Revenium-Subscriber-Id":              "subscriberId",
 	"X-Revenium-Product-Name":               "productName",
-	"X-Revenium-Product-Id":                 "productId",
+	"X-Revenium-Product-Id":                 "productName",
 	"X-Revenium-Organization-Name":          "organizationName",
-	"X-Revenium-Organization-Id":            "organizationId",
+	"X-Revenium-Organization-Id":            "organizationName",
 	"X-Revenium-Trace-Id":                   "traceId",
 	"X-Revenium-Task-Type":                  "taskType",
 	"X-Revenium-Agent":                      "agent",
