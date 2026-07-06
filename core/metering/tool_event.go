@@ -3,6 +3,7 @@ package metering
 import "time"
 
 type ToolEventPayload struct {
+	IdempotencyKey       string                 `json:"-"`
 	TransactionID        string                 `json:"transactionId,omitempty"`
 	ToolID               string                 `json:"toolId"`
 	Operation            string                 `json:"operation,omitempty"`
@@ -27,11 +28,12 @@ type ToolEventBuilder struct {
 func NewToolEvent(toolID string) *ToolEventBuilder {
 	return &ToolEventBuilder{
 		payload: &ToolEventPayload{
-			TransactionID: GenerateTransactionID(),
-			ToolID:        toolID,
-			Operation:     "execute",
-			Success:       true,
-			Timestamp:     time.Now().UTC().Format(time.RFC3339),
+			IdempotencyKey: GenerateTransactionID(),
+			TransactionID:  GenerateTransactionID(),
+			ToolID:         toolID,
+			Operation:      "execute",
+			Success:        true,
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		},
 	}
 }
@@ -117,6 +119,13 @@ func (b *ToolEventBuilder) WithUsageMetadata(meta map[string]interface{}) *ToolE
 func (b *ToolEventBuilder) WithTransactionID(id string) *ToolEventBuilder {
 	if id != "" {
 		b.payload.TransactionID = id
+	}
+	return b
+}
+
+func (b *ToolEventBuilder) WithIdempotencyKey(key string) *ToolEventBuilder {
+	if key != "" {
+		b.payload.IdempotencyKey = key
 	}
 	return b
 }

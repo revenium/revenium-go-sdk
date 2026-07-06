@@ -27,6 +27,7 @@ var stringFields = map[string]*func(*MeteringPayload) *string{
 	"systemFingerprint":   strSetter(func(p *MeteringPayload) *string { return &p.SystemFingerprint }),
 	"errorReason":         nil,
 	"transactionId":       strSetter(func(p *MeteringPayload) *string { return &p.TransactionID }),
+	"idempotencyKey":      strSetter(func(p *MeteringPayload) *string { return &p.IdempotencyKey }),
 	"failureCode":         strSetter(func(p *MeteringPayload) *string { return &p.FailureCode }),
 }
 
@@ -51,6 +52,9 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 	}
 
 	for key, setter := range stringFields {
+		if key == "organizationName" || key == "productName" {
+			continue
+		}
 		val, ok := metadata[key]
 		if !ok {
 			continue
@@ -68,6 +72,13 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 		if s, ok := val.(string); ok && s != "" {
 			*(*setter)(payload) = s
 		}
+	}
+
+	if s, ok := metadata["organizationName"].(string); ok && s != "" {
+		payload.OrganizationName = s
+	}
+	if s, ok := metadata["productName"].(string); ok && s != "" {
+		payload.ProductName = s
 	}
 
 	for key, setter := range floatFields {

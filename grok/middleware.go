@@ -155,9 +155,18 @@ func (r *ReveniumGrok) ChatCompletions(ctx context.Context, req ChatCompletionRe
 		stopReason = mapStopReasonToRevenium(resp.Choices[0].FinishReason)
 	}
 
+	var reasoningTokens, cacheReadTokens int
+	if resp.Usage.CompletionTokensDetails != nil {
+		reasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
+	}
+	if resp.Usage.PromptTokensDetails != nil {
+		cacheReadTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+
 	payload := metering.NewPayload(opType, resp.Model, "xai").
 		WithTiming(startTime, duration).
 		WithTokens(int64(resp.Usage.PromptTokens), int64(resp.Usage.CompletionTokens), int64(resp.Usage.TotalTokens)).
+		WithReasoningTokens(int64(reasoningTokens), 0, int64(cacheReadTokens)).
 		WithStopReason(stopReason).
 		WithModelSource("XAI").
 		WithTransactionID(resp.ID).

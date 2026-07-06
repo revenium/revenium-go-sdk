@@ -95,11 +95,11 @@ func usageMetadataToMap(metadata *UsageMetadata) map[string]interface{} {
 
 	m := make(map[string]interface{})
 
-	if metadata.OrganizationID != "" {
-		m["organizationName"] = metadata.OrganizationID
+	if metadata.OrganizationName != "" {
+		m["organizationName"] = metadata.OrganizationName
 	}
-	if metadata.ProductID != "" {
-		m["productName"] = metadata.ProductID
+	if metadata.ProductName != "" {
+		m["productName"] = metadata.ProductName
 	}
 	if metadata.TaskType != "" {
 		m["taskType"] = metadata.TaskType

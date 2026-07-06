@@ -10,8 +10,8 @@ import (
 func TestWithUsageMetadata(t *testing.T) {
 	ctx := context.Background()
 	metadata := map[string]interface{}{
-		"organizationName": "org-123",
-		"productName":      "prod-456",
+		"organizationId": "org-123",
+		"productId":      "prod-456",
 	}
 
 	ctx = WithUsageMetadata(ctx, metadata)
@@ -117,21 +117,21 @@ func TestMergeMetadata(t *testing.T) {
 func TestExtractMetadata(t *testing.T) {
 	ctx := context.Background()
 	contextMetadata := map[string]interface{}{
-		"organizationName": "org-123",
-		"productName":      "prod-456",
+		"organizationId": "org-123",
+		"productId":      "prod-456",
 	}
 	ctx = WithUsageMetadata(ctx, contextMetadata)
 
 	paramMetadata := map[string]interface{}{
 		"taskType":  "translation",
-		"productName": "prod-789", // Override
+		"productId": "prod-789", // Override
 	}
 
 	result := ExtractMetadata(ctx, paramMetadata)
 
 	expected := map[string]interface{}{
-		"organizationName": "org-123",
-		"productName":      "prod-789", // Overridden
+		"organizationId": "org-123",
+		"productId":      "prod-789", // Overridden
 		"taskType":       "translation",
 	}
 

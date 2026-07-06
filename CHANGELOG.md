@@ -1,19 +1,25 @@
-## Unreleased
-
-### Breaking changes
-
-- BACK-1456: Wire-key rename. The metering payload now emits `organizationName` and `productName` only.
-  - `MeteringPayload.OrganizationID` and `.ProductID` Go fields are retained for source-compat but tagged `json:"-"` so they no longer reach the wire (backend silently dropped the old wire keys per PR #2954). Migration: read/write `.OrganizationName` / `.ProductName` instead.
-  - `runway/UsageMetadata` keeps its Go field names `OrganizationID`/`ProductID`, but JSON tags now emit `organizationName`/`productName`.
-  - Legacy input keys `organizationId`/`productId` in caller-supplied `metadata` maps are still accepted and routed to the new fields for backward compatibility.
-  - LiteLLM headers `X-Revenium-Organization-Id`/`X-Revenium-Product-Id` now map to `organizationName`/`productName`.
-
 # Changelog
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.1.2] - 2026-07-06
+
+### Added
+
+- **Outcome amendment** via `AmendJobOutcome(jobID, amendment)` using PATCH endpoint
+- **Outcome history** via `GetJobOutcomeHistory(jobID)` returning ordered amendment entries
+- **Typed error `OutcomeAlreadyReportedError`** returned by `ReportJobOutcome` on 409 with structured body, exposing `JobID`, `ReportedAt`, and `AmendmentCount`
+- **Typed error `OutcomeNotReportedError`** returned by `AmendJobOutcome` on 422 (job has no outcome)
+- **Typed error `OutcomeAmendConflictError`** returned by `AmendJobOutcome` on 409 (concurrent amendment)
+- **New fields on `JobResource`**: `OutcomeAmendmentCount`, `OutcomeUpdatedAt`, `OutcomeUpdatedBy`
+- **Amend outcome example** in `examples/amend-outcome/`
+
+### Changed
+
+- **Breaking**: `ReportJobOutcome` now returns `*OutcomeAlreadyReportedError` on 409 responses with structured body instead of `nil, nil`. Callers relying on the previous silent `nil, nil` behavior must handle the new error type. Falls back to `nil, nil` for 409 responses without structured body (backward-compatible with older backends).
 
 ## [1.0.2] - 2026-05-08
 
@@ -73,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-module layout** so consumers pull only the providers they need
 - **CI/CD pipeline** with GitHub Actions for automated testing across all modules
 
+[1.1.2]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.2
 [1.0.2]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.2
 [1.0.1]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.1
 [1.0.0]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.0

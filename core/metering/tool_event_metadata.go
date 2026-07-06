@@ -13,6 +13,7 @@ var canonicalToolEventFields = []toolEventFieldMapping{
 	{"workflowId", func(p *ToolEventPayload) *string { return &p.WorkflowID }},
 	{"traceId", func(p *ToolEventPayload) *string { return &p.TraceID }},
 	{"transactionId", func(p *ToolEventPayload) *string { return &p.TransactionID }},
+	{"idempotencyKey", func(p *ToolEventPayload) *string { return &p.IdempotencyKey }},
 }
 
 var aliasToolEventFields = []toolEventFieldMapping{

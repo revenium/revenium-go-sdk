@@ -20,7 +20,7 @@ func main() {
 	defer client.Close()
 
 	result, err := client.Messages().CreateMessageStream(context.Background(), anthropic.MessageNewParams{
-		Model:     "claude-sonnet-4-20250514",
+		Model:     "claude-sonnet-4-6",
 		MaxTokens: 1024,
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("Write a short poem about technology.")),

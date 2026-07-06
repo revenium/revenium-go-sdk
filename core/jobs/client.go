@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
@@ -65,6 +66,9 @@ func (c *JobClient) ReportJobOutcome(jobID string, outcome *JobOutcome) (*JobRes
 	if err != nil {
 		if isConflictError(err) {
 			core.Debug("[JOBS] 409 Conflict - outcome already reported")
+			if parsed, ok := parseConflictBody(err, jobID); ok {
+				return nil, parsed
+			}
 			return nil, nil
 		}
 		return nil, err
@@ -196,6 +200,56 @@ func (c *JobClient) GetConversionFunnel(params *ConversionFunnelParams) (*Conver
 	return &result, nil
 }
 
+func (c *JobClient) AmendJobOutcome(jobID string, amendment *JobOutcomeAmendment) (*JobResource, error) {
+	if jobID == "" {
+		return nil, core.NewValidationError("job ID must not be empty", nil)
+	}
+	if amendment == nil {
+		return nil, core.NewValidationError("amendment must not be nil", nil)
+	}
+	if strings.TrimSpace(amendment.Reason) == "" {
+		return nil, core.NewValidationError("amendment.Reason is required and must be non-blank", nil)
+	}
+
+	path := fmt.Sprintf("%s/%s/outcome", jobsBasePath, url.PathEscape(jobID))
+	var result JobResource
+	err := c.doWithCircuitBreaker(func() error {
+		return c.doRequestWithBody(http.MethodPatch, path, nil, amendment, &result)
+	})
+	if err != nil {
+		if isUnprocessableError(err) {
+			return nil, &OutcomeNotReportedError{
+				JobID:   jobID,
+				Message: fmt.Sprintf("job %s has no outcome to amend", jobID),
+			}
+		}
+		if isConflictError(err) {
+			return nil, &OutcomeAmendConflictError{
+				JobID:   jobID,
+				Message: fmt.Sprintf("concurrent amendment conflict for job %s", jobID),
+			}
+		}
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *JobClient) GetJobOutcomeHistory(jobID string) ([]JobOutcomeAmendmentEntry, error) {
+	if jobID == "" {
+		return nil, core.NewValidationError("job ID must not be empty", nil)
+	}
+
+	path := fmt.Sprintf("%s/%s/outcome/history", jobsBasePath, url.PathEscape(jobID))
+	var result []JobOutcomeAmendmentEntry
+	err := c.doWithCircuitBreaker(func() error {
+		return c.doRequest(http.MethodGet, path, nil, &result)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (c *JobClient) doWithCircuitBreaker(fn func() error) error {
 	cb := resilience.GetGlobalCircuitBreaker()
 	retryConfig := c.retryConfig
@@ -288,6 +342,9 @@ func (c *JobClient) executeAndParse(req *http.Request, out interface{}) error {
 		default:
 			revErr := core.NewValidationError(msg, nil)
 			revErr.StatusCode = resp.StatusCode
+			if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity {
+				revErr = revErr.WithDetails("responseBody", string(body))
+			}
 			return revErr
 		}
 	}
@@ -305,6 +362,30 @@ func (c *JobClient) executeAndParse(req *http.Request, out interface{}) error {
 func isConflictError(err error) bool {
 	var revErr *core.ReveniumError
 	return errors.As(err, &revErr) && revErr.StatusCode == http.StatusConflict
+}
+
+func isUnprocessableError(err error) bool {
+	var revErr *core.ReveniumError
+	return errors.As(err, &revErr) && revErr.StatusCode == http.StatusUnprocessableEntity
+}
+
+func parseConflictBody(err error, jobID string) (*OutcomeAlreadyReportedError, bool) {
+	var revErr *core.ReveniumError
+	if !errors.As(err, &revErr) {
+		return nil, false
+	}
+	bodyStr, ok := revErr.GetDetails()["responseBody"].(string)
+	if !ok || bodyStr == "" {
+		return nil, false
+	}
+	var body conflictResponseBody
+	if json.Unmarshal([]byte(bodyStr), &body) != nil {
+		return nil, false
+	}
+	if body.Error == "" {
+		return nil, false
+	}
+	return newOutcomeAlreadyReportedError(jobID, &body), true
 }
 
 type halPagedResponse[T any] struct {
