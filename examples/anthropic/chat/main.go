@@ -20,7 +20,7 @@ func main() {
 	defer client.Close()
 
 	msg, err := client.Messages().CreateMessage(context.Background(), anthropic.MessageNewParams{
-		Model:     "claude-sonnet-4-20250514",
+		Model:     "claude-sonnet-4-6",
 		MaxTokens: 1024,
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("Explain the concept of middleware in software architecture in 2-3 sentences.")),

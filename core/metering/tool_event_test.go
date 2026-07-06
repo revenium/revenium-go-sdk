@@ -16,6 +16,8 @@ func TestNewToolEvent_Defaults(t *testing.T) {
 	assert.Equal(t, "execute", p.Operation)
 	assert.True(t, p.Success)
 	assert.NotEmpty(t, p.TransactionID)
+	assert.NotEmpty(t, p.IdempotencyKey)
+	assert.NotEqual(t, p.TransactionID, p.IdempotencyKey)
 	assert.NotEmpty(t, p.Timestamp)
 	assert.Equal(t, int64(0), p.DurationMs)
 	assert.Empty(t, p.ErrorMessage)
@@ -101,6 +103,7 @@ func TestToolEventPayload_JSONWireFormat(t *testing.T) {
 		WithDuration(1234 * time.Millisecond).
 		WithTimestamp(ts).
 		WithTransactionID("txn-001").
+		WithIdempotencyKey("idem-key-001").
 		Build()
 
 	data, err := json.Marshal(p)
@@ -124,6 +127,11 @@ func TestToolEventPayload_JSONWireFormat(t *testing.T) {
 
 	_, hasAgent := m["agent"]
 	assert.False(t, hasAgent, "empty agent should be omitted")
+
+	_, hasIdempotencyKey := m["idempotencyKey"]
+	assert.False(t, hasIdempotencyKey, "idempotencyKey must not appear in JSON body")
+
+	assert.Equal(t, "idem-key-001", p.IdempotencyKey)
 }
 
 func TestApplyToolEventMetadata_StringFields(t *testing.T) {
@@ -200,6 +208,28 @@ func TestApplyToolEventMetadata_Nil(t *testing.T) {
 	p := NewToolEvent("tool").Build()
 	ApplyToolEventMetadata(p, nil)
 	assert.True(t, p.Success)
+}
+
+func TestToolEventBuilder_IdempotencyKeyOverride(t *testing.T) {
+	p := NewToolEvent("tool").
+		WithIdempotencyKey("my-custom-key").
+		Build()
+	assert.Equal(t, "my-custom-key", p.IdempotencyKey)
+}
+
+func TestToolEventBuilder_EmptyIdempotencyKeyIgnored(t *testing.T) {
+	p := NewToolEvent("tool").
+		WithIdempotencyKey("").
+		Build()
+	assert.NotEmpty(t, p.IdempotencyKey)
+}
+
+func TestApplyToolEventMetadata_IdempotencyKey(t *testing.T) {
+	p := NewToolEvent("tool").Build()
+	ApplyToolEventMetadata(p, map[string]interface{}{
+		"idempotencyKey": "meta-key-789",
+	})
+	assert.Equal(t, "meta-key-789", p.IdempotencyKey)
 }
 
 func TestToolEventEndpoint(t *testing.T) {

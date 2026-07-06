@@ -74,14 +74,39 @@ func TestReportJobOutcomeSuccess(t *testing.T) {
 	assert.True(t, result.HasOutcome)
 }
 
-func TestReportJobOutcomeConflict409(t *testing.T) {
+func TestReportJobOutcomeConflict409WithStructuredBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(JobResource{
-			ID:           "existing",
-			AgenticJobID: "test-job",
-			HasOutcome:   true,
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":          "Outcome already reported",
+			"guidance":       "Use PATCH to amend",
+			"reportedAt":     "2026-06-12T10:00:00Z",
+			"amendmentCount": 2,
 		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	result, err := client.ReportJobOutcome("test-job", &JobOutcome{
+		ExecutionStatus: ExecutionStatusSuccess,
+	})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var conflictErr *OutcomeAlreadyReportedError
+	require.ErrorAs(t, err, &conflictErr)
+	assert.Equal(t, "test-job", conflictErr.JobID)
+	assert.Equal(t, "Outcome already reported", conflictErr.Message)
+	require.NotNil(t, conflictErr.ReportedAt)
+	assert.Equal(t, "2026-06-12T10:00:00Z", *conflictErr.ReportedAt)
+	assert.Equal(t, 2, conflictErr.AmendmentCount)
+}
+
+func TestReportJobOutcomeConflict409WithoutStructuredBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`plain text or empty`))
 	}))
 	defer server.Close()
 
@@ -410,4 +435,151 @@ func TestJobIDURLEncoding(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "job with spaces", result.AgenticJobID)
+}
+
+func TestAmendJobOutcomeSuccess(t *testing.T) {
+	amendCount := 1
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPatch, r.Method)
+		assert.Contains(t, r.URL.Path, "/profitstream/v2/api/jobs/job-1/outcome")
+
+		var body JobOutcomeAmendment
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "correcting status", body.Reason)
+		assert.Equal(t, ExecutionStatusFailed, body.ExecutionStatus)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(JobResource{
+			ID:                    "abc",
+			AgenticJobID:          "job-1",
+			HasOutcome:            true,
+			OutcomeAmendmentCount: &amendCount,
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	result, err := client.AmendJobOutcome("job-1", &JobOutcomeAmendment{
+		Reason:          "correcting status",
+		ExecutionStatus: ExecutionStatusFailed,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "abc", result.ID)
+	require.NotNil(t, result.OutcomeAmendmentCount)
+	assert.Equal(t, 1, *result.OutcomeAmendmentCount)
+}
+
+func TestAmendJobOutcomeBlankReason(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+
+	_, err := client.AmendJobOutcome("job-1", &JobOutcomeAmendment{Reason: ""})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Reason")
+
+	_, err = client.AmendJobOutcome("job-1", &JobOutcomeAmendment{Reason: "   "})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Reason")
+
+	assert.Equal(t, 0, callCount)
+}
+
+func TestAmendJobOutcomeNilAmendment(t *testing.T) {
+	client := newTestClient(t, "http://localhost")
+	_, err := client.AmendJobOutcome("job-1", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be nil")
+}
+
+func TestAmendJobOutcomeEmptyJobID(t *testing.T) {
+	client := newTestClient(t, "http://localhost")
+	_, err := client.AmendJobOutcome("", &JobOutcomeAmendment{Reason: "fix"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be empty")
+}
+
+func TestAmendJobOutcome422(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"error": "no outcome to amend"}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	result, err := client.AmendJobOutcome("job-1", &JobOutcomeAmendment{Reason: "fix"})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var notReported *OutcomeNotReportedError
+	require.ErrorAs(t, err, &notReported)
+	assert.Equal(t, "job-1", notReported.JobID)
+}
+
+func TestAmendJobOutcome409(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error": "conflict"}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	result, err := client.AmendJobOutcome("job-1", &JobOutcomeAmendment{Reason: "fix"})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var conflictErr *OutcomeAmendConflictError
+	require.ErrorAs(t, err, &conflictErr)
+	assert.Equal(t, "job-1", conflictErr.JobID)
+}
+
+func TestGetJobOutcomeHistorySuccess(t *testing.T) {
+	reason := "corrected value"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Contains(t, r.URL.Path, "/profitstream/v2/api/jobs/job-1/outcome/history")
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode([]JobOutcomeAmendmentEntry{
+			{
+				AmendmentSequence: 1,
+				ExecutionStatus:   ExecutionStatusSuccess,
+				ReportedAt:        "2026-06-10T10:00:00Z",
+			},
+			{
+				AmendmentSequence: 2,
+				ExecutionStatus:   ExecutionStatusFailed,
+				ReportedAt:        "2026-06-11T12:00:00Z",
+				Reason:            &reason,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	entries, err := client.GetJobOutcomeHistory("job-1")
+
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, 1, entries[0].AmendmentSequence)
+	assert.Nil(t, entries[0].Reason)
+	assert.Equal(t, 2, entries[1].AmendmentSequence)
+	require.NotNil(t, entries[1].Reason)
+	assert.Equal(t, "corrected value", *entries[1].Reason)
+}
+
+func TestGetJobOutcomeHistoryEmptyJobID(t *testing.T) {
+	client := newTestClient(t, "http://localhost")
+	_, err := client.GetJobOutcomeHistory("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be empty")
 }

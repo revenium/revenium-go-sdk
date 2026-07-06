@@ -13,7 +13,7 @@ func TestExtractProvider(t *testing.T) {
 	}{
 		{"openai/gpt-4", "OpenAI"},
 		{"openai/gpt-4o-mini", "OpenAI"},
-		{"anthropic/claude-3-opus-20240229", "Anthropic"},
+		{"anthropic/claude-opus-4-8", "Anthropic"},
 		{"vertex_ai/gemini-pro", "Google Vertex AI"},
 		{"gemini/gemini-1.5-flash", "Google"},
 		{"cohere/command-r-plus", "Cohere"},
@@ -23,12 +23,12 @@ func TestExtractProvider(t *testing.T) {
 		{"together_ai/meta-llama/Llama-3.1-8B", "Together AI"},
 		// Bare meta-llama (no prefix) must not be misattributed to Together AI
 		{"meta-llama/Llama-3.1-8B", "LiteLLM"},
-		{"bedrock/anthropic.claude-v2", "AWS Bedrock"},
+		{"bedrock/anthropic.claude-sonnet-4-6", "AWS Bedrock"},
 		{"perplexity/sonar-small", "Perplexity"},
 		{"azure/gpt-4", "Azure"},
 		// No prefix - resolved via pattern fallback
 		{"gpt-4", "OpenAI"},
-		{"claude-3-opus", "Anthropic"},
+		{"claude-opus-4-8", "Anthropic"},
 		{"my-gemini-tuned", "Google"},
 		// No prefix, no matching pattern
 		{"totally-unknown-model", "LiteLLM"},
@@ -50,7 +50,7 @@ func TestExtractModelSource(t *testing.T) {
 		expected string
 	}{
 		{"openai/gpt-4", "OPENAI"},
-		{"anthropic/claude-3-opus", "ANTHROPIC"},
+		{"anthropic/claude-opus-4-8", "ANTHROPIC"},
 		{"vertex_ai/gemini-pro", "GOOGLE"},
 		{"cohere/command-r", "COHERE"},
 		{"groq/llama-3.1-70b", "GROQ"},
@@ -73,8 +73,8 @@ func TestIsValidModelFormat(t *testing.T) {
 		ok    bool
 	}{
 		{"openai/gpt-4", true},
-		{"anthropic/claude-3.5-sonnet", true},
-		{"bedrock/anthropic.claude-v2:1", true},
+		{"anthropic/claude-sonnet-4-6", true},
+		{"bedrock/anthropic.claude-sonnet-4-6:1", true},
 		{"together_ai/meta-llama/Llama-3.1-8B", true},
 		{"", false},
 		{"   ", false},
@@ -137,7 +137,7 @@ func TestExtractModelName(t *testing.T) {
 		expected string
 	}{
 		{"openai/gpt-4", "gpt-4"},
-		{"anthropic/claude-3-opus-20240229", "claude-3-opus-20240229"},
+		{"anthropic/claude-opus-4-8", "claude-opus-4-8"},
 		{"vertex_ai/gemini-pro", "gemini-pro"},
 		{"gpt-4", "gpt-4"},
 		{"together_ai/meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B"},

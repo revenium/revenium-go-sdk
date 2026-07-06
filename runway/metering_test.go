@@ -57,8 +57,8 @@ func TestBuildVideoMeteringPayload_AppliesUsageMetadata(t *testing.T) {
 		Metadata: map[string]interface{}{},
 	}
 	md := &UsageMetadata{
-		OrganizationID: "org-1",
-		ProductID:      "prod-1",
+		OrganizationName: "org-1",
+		ProductName:      "prod-1",
 		TraceID:        "trace-1",
 	}
 	payload := buildVideoMeteringPayload(result, md, false, time.Now())
@@ -76,8 +76,8 @@ func TestUsageMetadataToMap_PopulatesAllFields(t *testing.T) {
 	retry := 2
 	score := 0.95
 	md := &UsageMetadata{
-		OrganizationID:       "org",
-		ProductID:            "prod",
+		OrganizationName:     "org",
+		ProductName:          "prod",
 		TaskType:             "video-gen",
 		Agent:                "agent-x",
 		SubscriptionID:       "sub-1",

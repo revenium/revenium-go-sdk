@@ -34,9 +34,9 @@ func TestStreamingWrapper_SetInputTokensUpdatesTotal(t *testing.T) {
 }
 
 func TestStreamingWrapper_SetModel(t *testing.T) {
-	w := &StreamingWrapper{model: "claude-3-haiku"}
-	w.SetModel("claude-3-5-sonnet")
-	assert.Equal(t, "claude-3-5-sonnet", w.model)
+	w := &StreamingWrapper{model: "claude-haiku-4-5"}
+	w.SetModel("claude-sonnet-4-6")
+	assert.Equal(t, "claude-sonnet-4-6", w.model)
 }
 
 func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
@@ -54,7 +54,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 		startTime:            startTime,
 		firstTokenTime:       &now,
 		messagesAPI:          &MessagesInterface{parent: r},
-		model:                "claude-3-haiku",
+		model:                "claude-haiku-4-5",
 		provider:             "anthropic",
 		stopReason:           "end_turn",
 		inputTokens:          120,
@@ -74,7 +74,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 	require.Len(t, payloads, 1)
 	p := payloads[0]
 	assert.Equal(t, "CHAT", p["operationType"])
-	assert.Equal(t, "claude-3-haiku", p["model"])
+	assert.Equal(t, "claude-haiku-4-5", p["model"])
 	assert.Equal(t, true, p["isStreamed"])
 	assert.Equal(t, float64(120), p["inputTokenCount"])
 	assert.Equal(t, float64(45), p["outputTokenCount"])
@@ -88,7 +88,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 
 func TestReconstructResponseFromChunks(t *testing.T) {
 	w := &StreamingWrapper{
-		model:                "claude-3-haiku",
+		model:                "claude-haiku-4-5",
 		stopReason:           "end_turn",
 		inputTokens:          10,
 		outputTokens:         5,
@@ -98,7 +98,7 @@ func TestReconstructResponseFromChunks(t *testing.T) {
 	}
 	msg := ReconstructResponseFromChunks(w)
 	require.NotNil(t, msg)
-	assert.Equal(t, "claude-3-haiku", string(msg.Model))
+	assert.Equal(t, "claude-haiku-4-5", string(msg.Model))
 	assert.Equal(t, "end_turn", string(msg.StopReason))
 	assert.Equal(t, int64(10), msg.Usage.InputTokens)
 	assert.Equal(t, int64(5), msg.Usage.OutputTokens)
@@ -108,7 +108,7 @@ func TestReconstructResponseFromChunks(t *testing.T) {
 }
 
 func TestReconstructResponseFromChunks_EmptyContent(t *testing.T) {
-	w := &StreamingWrapper{model: "claude-3-haiku", stopReason: "end_turn"}
+	w := &StreamingWrapper{model: "claude-haiku-4-5", stopReason: "end_turn"}
 	msg := ReconstructResponseFromChunks(w)
 	require.NotNil(t, msg)
 	assert.Empty(t, msg.Content)

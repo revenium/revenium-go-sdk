@@ -99,6 +99,15 @@ func (c *MeteringClient) SendToolEventSync(payload *ToolEventPayload) error {
 	})
 }
 
+func setCommonHeaders(req *http.Request, apiKey, idempotencyKey string) {
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("User-Agent", "revenium-go-sdk/1.0")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+}
+
 func (c *MeteringClient) sendToolEventRequest(payload *ToolEventPayload) error {
 	if payload == nil {
 		return core.NewValidationError("tool event payload must not be nil", nil)
@@ -118,9 +127,7 @@ func (c *MeteringClient) sendToolEventRequest(payload *ToolEventPayload) error {
 		return core.NewMeteringError("failed to create tool event request", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("x-api-key", c.config.APIKey)
-	req.Header.Set("User-Agent", "revenium-go-sdk/1.0")
+	setCommonHeaders(req, c.config.APIKey, payload.IdempotencyKey)
 
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
@@ -190,9 +197,7 @@ func (c *MeteringClient) sendRequest(payload *MeteringPayload) error {
 		return core.NewMeteringError("failed to create metering request", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("x-api-key", c.config.APIKey)
-	req.Header.Set("User-Agent", "revenium-go-sdk/1.0")
+	setCommonHeaders(req, c.config.APIKey, payload.IdempotencyKey)
 
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {

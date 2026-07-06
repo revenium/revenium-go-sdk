@@ -19,6 +19,8 @@ func TestNewPayload_Defaults(t *testing.T) {
 	assert.Equal(t, "OPENAI", p.Provider)
 	assert.Equal(t, MiddlewareSource, p.MiddlewareSource)
 	assert.NotEmpty(t, p.TransactionID)
+	assert.NotEmpty(t, p.IdempotencyKey)
+	assert.NotEqual(t, p.TransactionID, p.IdempotencyKey)
 	assert.Equal(t, int64(0), p.InputTokenCount)
 	assert.Equal(t, int64(0), p.OutputTokenCount)
 	assert.Equal(t, int64(0), p.ReasoningTokenCount)
@@ -94,6 +96,9 @@ func TestPayloadBuilder_JSONWireFormat(t *testing.T) {
 
 	_, hasSystemFingerprint := m["systemFingerprint"]
 	assert.False(t, hasSystemFingerprint, "empty systemFingerprint should be omitted")
+
+	_, hasIdempotencyKey := m["idempotencyKey"]
+	assert.False(t, hasIdempotencyKey, "idempotencyKey must not appear in JSON body")
 }
 
 func TestPayloadBuilder_ImageBilling(t *testing.T) {
@@ -116,4 +121,26 @@ func TestPayloadBuilder_VideoDuration(t *testing.T) {
 	assert.Equal(t, "VIDEO", p.OperationType)
 	assert.Equal(t, 5.0, *p.DurationSeconds)
 	assert.Equal(t, 10.0, *p.RequestedDurationSeconds)
+}
+
+func TestPayloadBuilder_IdempotencyKeyOverride(t *testing.T) {
+	p := NewPayload(OperationChat, "gpt-4", "OPENAI").
+		WithIdempotencyKey("my-custom-key").
+		Build()
+	assert.Equal(t, "my-custom-key", p.IdempotencyKey)
+}
+
+func TestPayloadBuilder_EmptyIdempotencyKeyIgnored(t *testing.T) {
+	p := NewPayload(OperationChat, "gpt-4", "OPENAI").
+		WithIdempotencyKey("").
+		Build()
+	assert.NotEmpty(t, p.IdempotencyKey)
+}
+
+func TestApplyMetadata_IdempotencyKey(t *testing.T) {
+	p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
+	ApplyMetadata(p, map[string]interface{}{
+		"idempotencyKey": "meta-key-456",
+	})
+	assert.Equal(t, "meta-key-456", p.IdempotencyKey)
 }

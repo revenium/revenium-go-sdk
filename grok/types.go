@@ -1,5 +1,7 @@
 package grok
 
+import "github.com/revenium/revenium-go-sdk/core/metering"
+
 // ChatCompletionRequest represents the OpenAI-compatible chat completion request for xAI Grok
 type ChatCompletionRequest struct {
 	Model            string                 `json:"model"`
@@ -23,18 +25,18 @@ type ChatCompletionRequest struct {
 // ChatMessage represents a message in the chat
 // Supports text and vision (multimodal) inputs
 type ChatMessage struct {
-	Role       string        `json:"role"`
-	Content    interface{}   `json:"content"` // Can be string or []ContentPart for multimodal
-	Name       string        `json:"name,omitempty"`
-	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content"` // Can be string or []ContentPart for multimodal
+	Name       string      `json:"name,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
 }
 
 // ContentPart represents a part of multimodal content (text or image)
 type ContentPart struct {
-	Type     string     `json:"type"`               // "text" or "image_url"
-	Text     string     `json:"text,omitempty"`     // For text content
-	ImageURL *ImageURL  `json:"image_url,omitempty"` // For image content
+	Type     string    `json:"type"`                // "text" or "image_url"
+	Text     string    `json:"text,omitempty"`      // For text content
+	ImageURL *ImageURL `json:"image_url,omitempty"` // For image content
 }
 
 // ImageURL represents an image URL in a content part
@@ -88,9 +90,10 @@ type Choice struct {
 	Logprobs     interface{} `json:"logprobs,omitempty"`
 }
 
-// Usage represents token usage
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                              `json:"prompt_tokens"`
+	CompletionTokens        int                              `json:"completion_tokens"`
+	TotalTokens             int                              `json:"total_tokens"`
+	PromptTokensDetails     *metering.PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *metering.CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }

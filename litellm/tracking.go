@@ -40,6 +40,12 @@ func ExtractMetadataFromHeaders(headers http.Header) map[string]interface{} {
 			out[field] = v
 		}
 	}
+	if v := headers.Get("X-Revenium-Organization-Name"); v != "" {
+		out["organizationName"] = v
+	}
+	if v := headers.Get("X-Revenium-Product-Name"); v != "" {
+		out["productName"] = v
+	}
 	if v := headers.Get("X-Revenium-Retry-Number"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			out["retryNumber"] = n

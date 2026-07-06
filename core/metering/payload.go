@@ -5,62 +5,61 @@ import "time"
 const MiddlewareSource = "revenium-go-sdk"
 
 type MeteringPayload struct {
-	StopReason       string `json:"stopReason"`
-	CostType         string `json:"costType"`
-	IsStreamed       bool   `json:"isStreamed"`
-	OperationType    string `json:"operationType"`
-	InputTokenCount  int64  `json:"inputTokenCount"`
-	OutputTokenCount int64  `json:"outputTokenCount"`
-	ReasoningTokenCount     int64 `json:"reasoningTokenCount"`
-	CacheCreationTokenCount int64 `json:"cacheCreationTokenCount"`
-	CacheReadTokenCount     int64 `json:"cacheReadTokenCount"`
-	TotalTokenCount  int64  `json:"totalTokenCount"`
-	Model            string `json:"model"`
-	TransactionID    string `json:"transactionId"`
-	ResponseTime     string `json:"responseTime"`
-	RequestDuration  int64  `json:"requestDuration"`
-	Provider         string `json:"provider"`
-	RequestTime      string `json:"requestTime"`
-	CompletionStartTime string `json:"completionStartTime"`
-	TimeToFirstToken int64  `json:"timeToFirstToken"`
-	MiddlewareSource string `json:"middlewareSource"`
-	ModelSource      string `json:"modelSource,omitempty"`
+	IdempotencyKey          string `json:"-"`
+	StopReason              string `json:"stopReason"`
+	CostType                string `json:"costType"`
+	IsStreamed              bool   `json:"isStreamed"`
+	OperationType           string `json:"operationType"`
+	InputTokenCount         int64  `json:"inputTokenCount"`
+	OutputTokenCount        int64  `json:"outputTokenCount"`
+	ReasoningTokenCount     int64  `json:"reasoningTokenCount"`
+	CacheCreationTokenCount int64  `json:"cacheCreationTokenCount"`
+	CacheReadTokenCount     int64  `json:"cacheReadTokenCount"`
+	TotalTokenCount         int64  `json:"totalTokenCount"`
+	Model                   string `json:"model"`
+	TransactionID           string `json:"transactionId"`
+	ResponseTime            string `json:"responseTime"`
+	RequestDuration         int64  `json:"requestDuration"`
+	Provider                string `json:"provider"`
+	RequestTime             string `json:"requestTime"`
+	CompletionStartTime     string `json:"completionStartTime"`
+	TimeToFirstToken        int64  `json:"timeToFirstToken"`
+	MiddlewareSource        string `json:"middlewareSource"`
+	ModelSource             string `json:"modelSource,omitempty"`
 
-	SystemFingerprint string  `json:"systemFingerprint,omitempty"`
+	SystemFingerprint string   `json:"systemFingerprint,omitempty"`
 	Temperature       *float64 `json:"temperature,omitempty"`
-	ErrorReason       string  `json:"errorReason,omitempty"`
+	ErrorReason       string   `json:"errorReason,omitempty"`
 
-	ActualImageCount    *int     `json:"actualImageCount,omitempty"`
-	RequestedImageCount *int     `json:"requestedImageCount,omitempty"`
-	DurationSeconds          *float64 `json:"durationSeconds,omitempty"`
-	RequestedDurationSeconds *float64 `json:"requestedDurationSeconds,omitempty"`
-	Attributes map[string]interface{} `json:"attributes,omitempty"`
+	ActualImageCount         *int                   `json:"actualImageCount,omitempty"`
+	RequestedImageCount      *int                   `json:"requestedImageCount,omitempty"`
+	DurationSeconds          *float64               `json:"durationSeconds,omitempty"`
+	RequestedDurationSeconds *float64               `json:"requestedDurationSeconds,omitempty"`
+	Attributes               map[string]interface{} `json:"attributes,omitempty"`
 
 	InputMessages    string `json:"inputMessages,omitempty"`
 	OutputResponse   string `json:"outputResponse,omitempty"`
 	PromptsTruncated bool   `json:"promptsTruncated,omitempty"`
 
-	OrganizationName string `json:"organizationName,omitempty"`
-	ProductName      string `json:"productName,omitempty"`
-	OrganizationID   string `json:"-"` // Deprecated: BACK-1456 — wire emits organizationName via OrganizationName.
-	ProductID        string `json:"-"` // Deprecated: BACK-1456 — wire emits productName via ProductName.
-	TaskType         string `json:"taskType,omitempty"`
-	Agent            string `json:"agent,omitempty"`
-	SubscriptionID   string `json:"subscriptionId,omitempty"`
-	TraceID          string `json:"traceId,omitempty"`
-	ParentTransactionID string `json:"parentTransactionId,omitempty"`
-	TraceType        string `json:"traceType,omitempty"`
-	TraceName        string `json:"traceName,omitempty"`
-	Environment      string `json:"environment,omitempty"`
-	Region           string `json:"region,omitempty"`
-	RetryNumber      *int   `json:"retryNumber,omitempty"`
-	CredentialAlias  string `json:"credentialAlias,omitempty"`
-	Subscriber       map[string]interface{} `json:"subscriber,omitempty"`
-	TaskID           string `json:"taskId,omitempty"`
-	VideoJobID       string `json:"videoJobId,omitempty"`
-	AudioJobID       string `json:"audioJobId,omitempty"`
-	ResponseQualityScore *float64 `json:"responseQualityScore,omitempty"`
-	MediationLatency *float64 `json:"mediationLatency,omitempty"`
+	OrganizationName     string                 `json:"organizationName,omitempty"`
+	ProductName          string                 `json:"productName,omitempty"`
+	TaskType             string                 `json:"taskType,omitempty"`
+	Agent                string                 `json:"agent,omitempty"`
+	SubscriptionID       string                 `json:"subscriptionId,omitempty"`
+	TraceID              string                 `json:"traceId,omitempty"`
+	ParentTransactionID  string                 `json:"parentTransactionId,omitempty"`
+	TraceType            string                 `json:"traceType,omitempty"`
+	TraceName            string                 `json:"traceName,omitempty"`
+	Environment          string                 `json:"environment,omitempty"`
+	Region               string                 `json:"region,omitempty"`
+	RetryNumber          *int                   `json:"retryNumber,omitempty"`
+	CredentialAlias      string                 `json:"credentialAlias,omitempty"`
+	Subscriber           map[string]interface{} `json:"subscriber,omitempty"`
+	TaskID               string                 `json:"taskId,omitempty"`
+	VideoJobID           string                 `json:"videoJobId,omitempty"`
+	AudioJobID           string                 `json:"audioJobId,omitempty"`
+	ResponseQualityScore *float64               `json:"responseQualityScore,omitempty"`
+	MediationLatency     *float64               `json:"mediationLatency,omitempty"`
 
 	InputTokenCost         *float64 `json:"inputTokenCost,omitempty"`
 	OutputTokenCost        *float64 `json:"outputTokenCost,omitempty"`
@@ -78,6 +77,7 @@ type PayloadBuilder struct {
 func NewPayload(op OperationType, model, provider string) *PayloadBuilder {
 	return &PayloadBuilder{
 		payload: &MeteringPayload{
+			IdempotencyKey:   GenerateTransactionID(),
 			StopReason:       "END",
 			CostType:         "AI",
 			OperationType:    string(op),
@@ -184,6 +184,13 @@ func (b *PayloadBuilder) WithPromptCapture(input, output string, truncated bool)
 func (b *PayloadBuilder) WithTransactionID(id string) *PayloadBuilder {
 	if id != "" {
 		b.payload.TransactionID = id
+	}
+	return b
+}
+
+func (b *PayloadBuilder) WithIdempotencyKey(key string) *PayloadBuilder {
+	if key != "" {
+		b.payload.IdempotencyKey = key
 	}
 	return b
 }

@@ -177,7 +177,7 @@ func main() {
     defer client.Close()
 
     msg, err := client.Messages().CreateMessage(context.Background(), anthropic.MessageNewParams{
-        Model:     "claude-sonnet-4-20250514",
+        Model:     "claude-sonnet-4-6",
         MaxTokens: 1024,
         Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Hello!"))},
     })
@@ -566,21 +566,50 @@ mc.SendToolEvent(payload)
 
 ### Job Outcomes
 
-Track long-running job outcomes with ROI metrics via `core/jobs`:
+Track and amend long-running job outcomes with ROI metrics via `core/jobs`:
 
 ```go
-import "github.com/revenium/revenium-go-sdk/core/jobs"
+import (
+    "errors"
+    "github.com/revenium/revenium-go-sdk/core/jobs"
+)
 
 client, _ := jobs.NewJobClient(jobs.JobClientConfig{
     APIKey: os.Getenv("REVENIUM_METERING_API_KEY"),
+    TeamID: os.Getenv("REVENIUM_TEAM_ID"),
 })
 
-_, _ = client.ReportJobOutcome("job-123", &jobs.JobOutcome{
-    Status: "completed",
+_, err := client.ReportJobOutcome("job-123", &jobs.JobOutcome{
+    ExecutionStatus: jobs.ExecutionStatusSuccess,
+    OutcomeType:     jobs.OutcomeConverted,
 })
 
-pagedJobs, _ := client.ListJobs(&jobs.ListJobsParams{PageSize: 20})
-_ = pagedJobs
+var alreadyReported *jobs.OutcomeAlreadyReportedError
+if errors.As(err, &alreadyReported) {
+    // Outcome was already reported, amend it instead
+}
+```
+
+### Amending an Outcome
+
+Outcomes are mutable. Use `AmendJobOutcome` to correct or update a previously reported outcome:
+
+```go
+amended, err := client.AmendJobOutcome("job-123", &jobs.JobOutcomeAmendment{
+    Reason:          "correcting outcome after manual review",
+    ExecutionStatus: jobs.ExecutionStatusFailed,
+    OutcomeType:     jobs.OutcomeUnsuccessful,
+})
+```
+
+Retrieve the full amendment history for a job:
+
+```go
+history, _ := client.GetJobOutcomeHistory("job-123")
+for _, entry := range history {
+    // entry.AmendmentSequence: 1 = initial report, 2+ = amendments
+    // entry.Reason: nil for initial report, set for amendments
+}
 ```
 
 ## Metadata Fields

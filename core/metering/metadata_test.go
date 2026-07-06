@@ -9,8 +9,8 @@ import (
 func TestApplyMetadata_StringFields(t *testing.T) {
 	p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
 	ApplyMetadata(p, map[string]interface{}{
-		"organizationName":      "org-123",
-		"productName":           "prod-456",
+		"organizationId":      "org-123",
+		"productId":           "prod-456",
 		"taskType":            "summarize",
 		"agent":               "my-agent",
 		"subscriptionId":      "sub-789",
@@ -95,6 +95,19 @@ func TestApplyMetadata_Subscriber(t *testing.T) {
 		"subscriber": sub,
 	})
 	assert.Equal(t, sub, p.Subscriber)
+}
+
+func TestApplyMetadata_CanonicalOverridesDeprecated(t *testing.T) {
+	p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
+	ApplyMetadata(p, map[string]interface{}{
+		"organizationId":   "old-org",
+		"organizationName": "new-org",
+		"productId":        "old-prod",
+		"productName":      "new-prod",
+	})
+
+	assert.Equal(t, "new-org", p.OrganizationName)
+	assert.Equal(t, "new-prod", p.ProductName)
 }
 
 func TestApplyMetadata_Nil(t *testing.T) {
