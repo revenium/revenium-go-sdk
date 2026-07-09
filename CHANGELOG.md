@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-07-09
+
+### Added
+
+- **Store-and-forward buffer** for metering events that exhaust retries or are rejected by the circuit breaker, preventing permanent event loss during backend outages
+- **Automatic replay** of buffered events every 30 seconds (configurable) with stop-on-first-failure to avoid hammering a down backend
+- **Bounded buffer** with configurable max size (default 1000), FIFO eviction, and 24-hour event TTL aligned with backend IdempotencyKey window
+- **Graceful shutdown** integration: `Flush()` and `Close()` drain the buffer before returning
+- **`GetBufferStats()`** exported for programmatic observability (size, capacity, events replayed, events evicted)
+- **`BufferMaxSize`** and **`BufferFlushInterval`** fields on `MeteringClientConfig`
+
 ## [1.1.2] - 2026-07-06
 
 ### Added
@@ -79,6 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-module layout** so consumers pull only the providers they need
 - **CI/CD pipeline** with GitHub Actions for automated testing across all modules
 
+[1.1.3]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.3
 [1.1.2]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.2
 [1.0.2]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.2
 [1.0.1]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.0.1

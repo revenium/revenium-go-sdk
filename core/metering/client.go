@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,21 +27,27 @@ var sharedHTTPClient = &http.Client{
 }
 
 type MeteringClientConfig struct {
-	APIKey  string
-	BaseURL string
+	APIKey             string
+	BaseURL            string
+	BufferMaxSize      int
+	BufferFlushInterval time.Duration
 }
 
 type MeteringClient struct {
 	config      MeteringClientConfig
 	wg          sync.WaitGroup
 	retryConfig *resilience.RetryConfig
+	buffer      *MeteringBuffer
 }
 
 func NewMeteringClient(cfg MeteringClientConfig) (*MeteringClient, error) {
 	if cfg.APIKey == "" {
 		return nil, core.NewConfigError("metering API key is required", nil)
 	}
-	return &MeteringClient{config: cfg}, nil
+	return &MeteringClient{
+		config: cfg,
+		buffer: NewMeteringBuffer(cfg.BufferMaxSize, cfg.BufferFlushInterval, defaultBufferFlushTimeout),
+	}, nil
 }
 
 func (c *MeteringClient) Send(payload *MeteringPayload) {
@@ -53,7 +60,11 @@ func (c *MeteringClient) Send(payload *MeteringPayload) {
 			}
 		}()
 		if err := c.SendSync(payload); err != nil {
-			core.Error("failed to send metering data: %v", err)
+			if isBufferable(err) {
+				core.Debug("metering event buffered for retry: %v", err)
+			} else {
+				core.Error("failed to send metering data: %v", err)
+			}
 		}
 	}()
 }
@@ -64,11 +75,15 @@ func (c *MeteringClient) SendSync(payload *MeteringPayload) error {
 	if retryConfig == nil {
 		retryConfig = resilience.DefaultRetryConfig()
 	}
-	return cb.Execute(func() error {
+	err := cb.Execute(func() error {
 		return resilience.WithRetry(context.Background(), func() error {
 			return c.sendRequest(payload)
 		}, retryConfig)
 	})
+	if err != nil {
+		c.bufferMeteringEvent(err, payload)
+	}
+	return err
 }
 
 func (c *MeteringClient) SendToolEvent(payload *ToolEventPayload) {
@@ -81,7 +96,11 @@ func (c *MeteringClient) SendToolEvent(payload *ToolEventPayload) {
 			}
 		}()
 		if err := c.SendToolEventSync(payload); err != nil {
-			core.Error("failed to send tool event data: %v", err)
+			if isBufferable(err) {
+				core.Debug("tool event buffered for retry: %v", err)
+			} else {
+				core.Error("failed to send tool event data: %v", err)
+			}
 		}
 	}()
 }
@@ -92,11 +111,15 @@ func (c *MeteringClient) SendToolEventSync(payload *ToolEventPayload) error {
 	if retryConfig == nil {
 		retryConfig = resilience.DefaultRetryConfig()
 	}
-	return cb.Execute(func() error {
+	err := cb.Execute(func() error {
 		return resilience.WithRetry(context.Background(), func() error {
 			return c.sendToolEventRequest(payload)
 		}, retryConfig)
 	})
+	if err != nil {
+		c.bufferToolEvent(err, payload)
+	}
+	return err
 }
 
 func setCommonHeaders(req *http.Request, apiKey, idempotencyKey string) {
@@ -175,11 +198,68 @@ func printPayloadSummary(jsonData []byte) {
 
 func (c *MeteringClient) Flush() {
 	c.wg.Wait()
+	c.buffer.DrainWithTimeout(c.buffer.flushTimeout)
 }
 
 func (c *MeteringClient) Close() error {
-	c.Flush()
+	c.wg.Wait()
+	c.buffer.Stop()
 	return nil
+}
+
+func (c *MeteringClient) GetBufferStats() BufferStats {
+	return c.buffer.GetBufferStats()
+}
+
+func (c *MeteringClient) buildHeadersMap(idempotencyKey string) map[string]string {
+	h := map[string]string{
+		"Content-Type": "application/json; charset=utf-8",
+		"x-api-key":    c.config.APIKey,
+		"User-Agent":   "revenium-go-sdk/1.0",
+	}
+	if idempotencyKey != "" {
+		h["Idempotency-Key"] = idempotencyKey
+	}
+	return h
+}
+
+func (c *MeteringClient) bufferMeteringEvent(err error, payload *MeteringPayload) {
+	if !isBufferable(err) {
+		return
+	}
+	jsonData, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return
+	}
+	c.buffer.Push(BufferedEvent{
+		URL:            MeteringEndpoint(c.config.BaseURL, OperationType(payload.OperationType)),
+		Headers:        c.buildHeadersMap(payload.IdempotencyKey),
+		Body:           jsonData,
+		IdempotencyKey: payload.IdempotencyKey,
+	})
+}
+
+func (c *MeteringClient) bufferToolEvent(err error, payload *ToolEventPayload) {
+	if !isBufferable(err) {
+		return
+	}
+	jsonData, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return
+	}
+	c.buffer.Push(BufferedEvent{
+		URL:            ToolEventEndpoint(c.config.BaseURL),
+		Headers:        c.buildHeadersMap(payload.IdempotencyKey),
+		Body:           jsonData,
+		IdempotencyKey: payload.IdempotencyKey,
+	})
+}
+
+func isBufferable(err error) bool {
+	if errors.Is(err, resilience.ErrCircuitOpen) {
+		return true
+	}
+	return resilience.IsRetryable(resilience.ClassifyError(err))
 }
 
 func (c *MeteringClient) sendRequest(payload *MeteringPayload) error {
