@@ -96,8 +96,13 @@ func (m *ModelsInterface) EditImage(
 	attrs := map[string]interface{}{
 		"operationSubtype": "edit",
 	}
-	if config != nil && config.NumberOfImages > 0 {
-		requested = int(config.NumberOfImages)
+	if config != nil {
+		if config.NumberOfImages > 0 {
+			requested = int(config.NumberOfImages)
+		}
+		if config.AspectRatio != "" {
+			attrs["resolution"] = mapAspectRatioToResolution(config.AspectRatio)
+		}
 	}
 
 	core.Debug("EditImage completed in %v, images: %d", duration, actual)
@@ -145,6 +150,9 @@ func (m *ModelsInterface) UpscaleImage(
 	attrs := map[string]interface{}{
 		"operationSubtype": "upscale",
 		"upscaleFactor":    upscaleFactor,
+	}
+	if upscaleFactor != "" {
+		attrs["resolution"] = mapUpscaleFactorToResolution(upscaleFactor)
 	}
 
 	core.Debug("UpscaleImage completed in %v, images: %d", duration, actual)

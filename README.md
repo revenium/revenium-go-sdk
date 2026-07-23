@@ -188,7 +188,7 @@ func main() {
 }
 ```
 
-Bedrock is auto-detected when `AWS_BEDROCK_ENABLED=true` along with the AWS credentials.
+Bedrock is auto-detected when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set, or when `BaseURL` contains `amazonaws.com`. Disable with `REVENIUM_BEDROCK_DISABLE=true`. To use the Converse API instead of InvokeModel, set `REVENIUM_BEDROCK_USE_CONVERSE=true`.
 
 ### Google GenAI / Vertex AI
 
@@ -670,7 +670,10 @@ Environment variables picked up automatically for distributed tracing and analyt
 | `AZURE_OPENAI_ENDPOINT`          | Azure OpenAI      | Azure resource endpoint URL                         |
 | `AZURE_OPENAI_API_VERSION`       | Azure OpenAI      | API version (default: `2024-02-15-preview`)         |
 | `ANTHROPIC_API_KEY`              | Anthropic         | Anthropic API key                                   |
-| `AWS_BEDROCK_ENABLED`            | Anthropic Bedrock | Enable Bedrock transport (`true`)                   |
+| `AWS_ACCESS_KEY_ID`              | Anthropic Bedrock | AWS access key (auto-enables Bedrock when paired with secret key) |
+| `AWS_SECRET_ACCESS_KEY`          | Anthropic Bedrock | AWS secret key                                      |
+| `REVENIUM_BEDROCK_DISABLE`      | Anthropic Bedrock | Disable Bedrock transport (`true`)                  |
+| `REVENIUM_BEDROCK_USE_CONVERSE` | Anthropic Bedrock | Use Converse API instead of InvokeModel (`true`)    |
 | `GOOGLE_API_KEY`                 | Google GenAI      | Google AI Studio API key                            |
 | `GOOGLE_CLOUD_PROJECT`           | Google Vertex     | GCP project ID (enables Vertex mode)                |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google Vertex     | Path to service account key file                    |

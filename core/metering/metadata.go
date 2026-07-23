@@ -17,6 +17,7 @@ var stringFields = map[string]*func(*MeteringPayload) *string{
 	"parentTransactionId": strSetter(func(p *MeteringPayload) *string { return &p.ParentTransactionID }),
 	"traceType":           strSetter(func(p *MeteringPayload) *string { return &p.TraceType }),
 	"traceName":           strSetter(func(p *MeteringPayload) *string { return &p.TraceName }),
+	"ticketId":            strSetter(func(p *MeteringPayload) *string { return &p.TicketID }),
 	"environment":         strSetter(func(p *MeteringPayload) *string { return &p.Environment }),
 	"region":              strSetter(func(p *MeteringPayload) *string { return &p.Region }),
 	"credentialAlias":     strSetter(func(p *MeteringPayload) *string { return &p.CredentialAlias }),

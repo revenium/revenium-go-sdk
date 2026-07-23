@@ -14,12 +14,21 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
 	"github.com/revenium/revenium-go-sdk/core"
 )
+
+type BedrockClient interface {
+	InvokeModel(ctx context.Context, params *bedrockruntime.InvokeModelInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelOutput, error)
+	InvokeModelWithResponseStream(ctx context.Context, params *bedrockruntime.InvokeModelWithResponseStreamInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelWithResponseStreamOutput, error)
+	Converse(ctx context.Context, params *bedrockruntime.ConverseInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	ConverseStream(ctx context.Context, params *bedrockruntime.ConverseStreamInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseStreamOutput, error)
+}
 
 // ValidateBedrockBaseARN validates that the AWS_MODEL_ARN_ID has the correct base format
 // Expected format: arn:aws:bedrock:{region}:{account-id}
@@ -76,28 +85,23 @@ func ConstructFullBedrockARN(arnBase string, modelName string) (string, error) {
 // Otherwise, it uses the standard Bedrock format: anthropic.{model_name}
 // If the input is already a full ARN, it returns it unchanged.
 func GetBedrockModelID(modelName string, config *Config) string {
-	// If it's already a full ARN, return as-is
 	if strings.HasPrefix(modelName, "arn:aws:bedrock:") {
 		return modelName
 	}
 
-	// If AWS_MODEL_ARN_ID is configured, construct full ARN
+	if strings.Contains(modelName, "anthropic.") {
+		return modelName
+	}
+
 	if config != nil && config.AWSModelARNBase != "" {
 		fullARN, err := ConstructFullBedrockARN(config.AWSModelARNBase, modelName)
 		if err != nil {
-			// Log error but continue with fallback
 			log.Printf("Warning: Failed to construct Bedrock ARN: %v. Using standard format.", err)
 		} else {
 			return fullARN
 		}
 	}
 
-	// If it already has the anthropic. prefix, return as-is
-	if strings.HasPrefix(modelName, "anthropic.") {
-		return modelName
-	}
-
-	// Otherwise, add the standard Bedrock format prefix
 	return fmt.Sprintf("anthropic.%s", modelName)
 }
 
@@ -149,10 +153,9 @@ func ConvertBedrockARNToAnthropicModel(bedrockModel string) (string, error) {
 	return "", fmt.Errorf("could not parse Bedrock model ID '%s': unrecognized format", bedrockModel)
 }
 
-// BedrockAdapter handles AWS Bedrock integration
 type BedrockAdapter struct {
 	config *Config
-	client *bedrockruntime.Client
+	client BedrockClient
 	awsCfg aws.Config
 }
 
@@ -293,15 +296,184 @@ func (ba *BedrockAdapter) CreateMessageStream(ctx context.Context, params anthro
 		return nil, fmt.Errorf("bedrock streaming api error: %w", err)
 	}
 
-	// Step 4: Create a streaming wrapper for Bedrock events
-	wrapper := &BedrockStreamingWrapper{
-		stream:    streamOutput,
-		modelID:   modelID,
-		startTime: time.Now(),
-	}
+	wrapper := newBedrockStreamingWrapper(streamOutput, modelID)
 
 	core.Debug("Successfully created streaming message via Bedrock")
 	return wrapper, nil
+}
+
+func (ba *BedrockAdapter) CreateMessageConverse(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	modelID := GetBedrockModelID(string(params.Model), ba.config)
+
+	converseMessages := transformToConverseMessages(params.Messages)
+	input := &bedrockruntime.ConverseInput{
+		ModelId:  aws.String(modelID),
+		Messages: converseMessages,
+		System:   transformSystemPrompt(params.System),
+	}
+
+	if params.MaxTokens != 0 {
+		input.InferenceConfig = &brtypes.InferenceConfiguration{
+			MaxTokens: aws.Int32(int32(params.MaxTokens)),
+		}
+	}
+	if len(params.StopSequences) > 0 {
+		seqs := make([]string, len(params.StopSequences))
+		for i, s := range params.StopSequences {
+			seqs[i] = string(s)
+		}
+		if input.InferenceConfig == nil {
+			input.InferenceConfig = &brtypes.InferenceConfiguration{}
+		}
+		input.InferenceConfig.StopSequences = seqs
+	}
+
+	core.Debug("Calling Bedrock Converse API")
+	out, err := ba.client.Converse(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock converse api error: %w", err)
+	}
+
+	msg := &anthropic.Message{
+		Type: "message",
+		Role: "assistant",
+	}
+
+	if reqID, ok := awsmiddleware.GetRequestIDMetadata(out.ResultMetadata); ok {
+		msg.ID = reqID
+	}
+
+	reflect.ValueOf(msg).Elem().FieldByName("Model").SetString(modelID)
+
+	if msgOut, ok := out.Output.(*brtypes.ConverseOutputMemberMessage); ok {
+		var textParts []string
+		for _, block := range msgOut.Value.Content {
+			if tb, ok := block.(*brtypes.ContentBlockMemberText); ok {
+				textParts = append(textParts, tb.Value)
+			}
+		}
+		if len(textParts) > 0 {
+			fullText, _ := json.Marshal(strings.Join(textParts, ""))
+			contentJSON := `[{"type":"text","text":` + string(fullText) + `}]`
+			contentField := reflect.ValueOf(msg).Elem().FieldByName("Content")
+			if contentField.IsValid() && contentField.CanSet() {
+				contentValue := reflect.New(contentField.Type())
+				if err := json.Unmarshal([]byte(contentJSON), contentValue.Interface()); err == nil {
+					contentField.Set(contentValue.Elem())
+				}
+			}
+		}
+	}
+
+	reflect.ValueOf(msg).Elem().FieldByName("StopReason").SetString(convertConverseStopReason(out.StopReason))
+
+	if out.Usage != nil {
+		usageField := reflect.ValueOf(msg).Elem().FieldByName("Usage")
+		if usageField.IsValid() && usageField.CanSet() {
+			if out.Usage.InputTokens != nil {
+				usageField.FieldByName("InputTokens").SetInt(int64(*out.Usage.InputTokens))
+			}
+			if out.Usage.OutputTokens != nil {
+				usageField.FieldByName("OutputTokens").SetInt(int64(*out.Usage.OutputTokens))
+			}
+			if out.Usage.CacheReadInputTokens != nil {
+				usageField.FieldByName("CacheReadInputTokens").SetInt(int64(*out.Usage.CacheReadInputTokens))
+			}
+			if out.Usage.CacheWriteInputTokens != nil {
+				usageField.FieldByName("CacheCreationInputTokens").SetInt(int64(*out.Usage.CacheWriteInputTokens))
+			}
+		}
+	}
+
+	core.Debug("Successfully created message via Bedrock Converse")
+	return msg, nil
+}
+
+func (ba *BedrockAdapter) CreateMessageStreamConverse(ctx context.Context, params anthropic.MessageNewParams) (*ConverseStreamingWrapper, error) {
+	modelID := GetBedrockModelID(string(params.Model), ba.config)
+
+	converseMessages := transformToConverseMessages(params.Messages)
+	input := &bedrockruntime.ConverseStreamInput{
+		ModelId:  aws.String(modelID),
+		Messages: converseMessages,
+		System:   transformSystemPrompt(params.System),
+	}
+
+	if params.MaxTokens != 0 {
+		input.InferenceConfig = &brtypes.InferenceConfiguration{
+			MaxTokens: aws.Int32(int32(params.MaxTokens)),
+		}
+	}
+	if len(params.StopSequences) > 0 {
+		seqs := make([]string, len(params.StopSequences))
+		for i, s := range params.StopSequences {
+			seqs[i] = string(s)
+		}
+		if input.InferenceConfig == nil {
+			input.InferenceConfig = &brtypes.InferenceConfiguration{}
+		}
+		input.InferenceConfig.StopSequences = seqs
+	}
+
+	core.Debug("Calling Bedrock ConverseStream API")
+	out, err := ba.client.ConverseStream(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock conversestream api error: %w", err)
+	}
+
+	wrapper := newConverseStreamingWrapper(out, modelID)
+	core.Debug("Successfully created streaming message via Bedrock ConverseStream")
+	return wrapper, nil
+}
+
+func transformToConverseMessages(messages []anthropic.MessageParam) []brtypes.Message {
+	var result []brtypes.Message
+	for _, msg := range messages {
+		var content []brtypes.ContentBlock
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				content = append(content, &brtypes.ContentBlockMemberText{Value: block.OfText.Text})
+			}
+		}
+		if len(content) == 0 {
+			content = append(content, &brtypes.ContentBlockMemberText{Value: ""})
+		}
+		result = append(result, brtypes.Message{
+			Role:    brtypes.ConversationRole(msg.Role),
+			Content: content,
+		})
+	}
+	return result
+}
+
+func transformSystemPrompt(system []anthropic.TextBlockParam) []brtypes.SystemContentBlock {
+	if len(system) == 0 {
+		return nil
+	}
+	var blocks []brtypes.SystemContentBlock
+	for _, s := range system {
+		blocks = append(blocks, &brtypes.SystemContentBlockMemberText{Value: s.Text})
+	}
+	return blocks
+}
+
+func convertConverseStopReason(reason brtypes.StopReason) string {
+	switch reason {
+	case brtypes.StopReasonEndTurn:
+		return "end_turn"
+	case brtypes.StopReasonMaxTokens:
+		return "max_tokens"
+	case brtypes.StopReasonStopSequence:
+		return "stop_sequence"
+	case brtypes.StopReasonToolUse:
+		return "tool_use"
+	case brtypes.StopReasonContentFiltered:
+		return "content_filtered"
+	case brtypes.StopReasonGuardrailIntervened:
+		return "guardrail_intervened"
+	default:
+		return string(reason)
+	}
 }
 
 // TransformRequestToBedrockFormat converts an Anthropic request to Bedrock format
@@ -457,55 +629,159 @@ func (ba *BedrockAdapter) FallbackToAnthropic(ctx context.Context, params anthro
 	return client.Messages.New(ctx, params)
 }
 
-// BedrockStreamingWrapper wraps Bedrock streaming response for compatibility with Anthropic streaming
 type BedrockStreamingWrapper struct {
-	stream    *bedrockruntime.InvokeModelWithResponseStreamOutput
-	modelID   string
-	startTime time.Time
-	mu        sync.Mutex
+	stream       *bedrockruntime.InvokeModelWithResponseStreamOutput
+	events       <-chan brtypes.ResponseStream
+	currentEvent interface{}
+	currentText  string
+	streamErr    error
+	done         bool
+	modelID      string
+	startTime    time.Time
+	mu           sync.Mutex
 }
 
-// Next returns the next event from the Bedrock stream
-func (bsw *BedrockStreamingWrapper) Next(ctx context.Context) bool {
-	if bsw.stream == nil {
+func newBedrockStreamingWrapper(stream *bedrockruntime.InvokeModelWithResponseStreamOutput, modelID string) *BedrockStreamingWrapper {
+	w := &BedrockStreamingWrapper{
+		stream:    stream,
+		modelID:   modelID,
+		startTime: time.Now(),
+	}
+	if stream != nil && stream.GetStream() != nil {
+		w.events = stream.GetStream().Events()
+	}
+	return w
+}
+
+func (bsw *BedrockStreamingWrapper) Next() bool {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+
+	if bsw.done || bsw.events == nil {
 		return false
 	}
 
-	// Read next event from stream
-	// The EventStream field contains the streaming events
-	// This is a simplified implementation - in production you'd need to properly
-	// handle the event stream from Bedrock using the EventStream interface
-	return false
-}
+	event, ok := <-bsw.events
+	if !ok {
+		bsw.done = true
+		if bsw.stream != nil && bsw.stream.GetStream() != nil {
+			bsw.streamErr = bsw.stream.GetStream().Err()
+		}
+		return false
+	}
 
-// Current returns the current event
-func (bsw *BedrockStreamingWrapper) Current() interface{} {
-	// Return current event
-	return nil
-}
+	bsw.currentEvent = event
+	bsw.currentText = ""
 
-// Err returns any error that occurred during streaming
-func (bsw *BedrockStreamingWrapper) Err() error {
-	// Return error if any
-	return nil
-}
-
-// Close closes the stream
-func (bsw *BedrockStreamingWrapper) Close() error {
-	if bsw.stream != nil {
-		// Use reflection to access the private eventStream field
-		streamField := reflect.ValueOf(bsw.stream).Elem().FieldByName("eventStream")
-		if streamField.IsValid() {
-			// Try to call Close method if it exists
-			if closeMethod := streamField.MethodByName("Close"); closeMethod.IsValid() {
-				result := closeMethod.Call(nil)
-				if len(result) > 0 {
-					if err, ok := result[0].Interface().(error); ok {
-						return err
-					}
+	if chunk, ok := event.(*brtypes.ResponseStreamMemberChunk); ok && chunk.Value.Bytes != nil {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(chunk.Value.Bytes, &parsed); err == nil {
+			if delta, ok := parsed["delta"].(map[string]interface{}); ok {
+				if text, ok := delta["text"].(string); ok {
+					bsw.currentText = text
 				}
 			}
 		}
+	}
+
+	return true
+}
+
+func (bsw *BedrockStreamingWrapper) Current() interface{} {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.currentEvent
+}
+
+func (bsw *BedrockStreamingWrapper) Err() error {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.streamErr
+}
+
+func (bsw *BedrockStreamingWrapper) Close() error {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	if bsw.stream != nil && bsw.stream.GetStream() != nil {
+		return bsw.stream.GetStream().Close()
+	}
+	return nil
+}
+
+type ConverseStreamingWrapper struct {
+	stream       *bedrockruntime.ConverseStreamOutput
+	events       <-chan brtypes.ConverseStreamOutput
+	currentEvent interface{}
+	currentText  string
+	streamErr    error
+	done         bool
+	modelID      string
+	requestID    string
+	startTime    time.Time
+	mu           sync.Mutex
+}
+
+func newConverseStreamingWrapper(stream *bedrockruntime.ConverseStreamOutput, modelID string) *ConverseStreamingWrapper {
+	w := &ConverseStreamingWrapper{
+		stream:    stream,
+		modelID:   modelID,
+		startTime: time.Now(),
+	}
+	if stream != nil && stream.GetStream() != nil {
+		w.events = stream.GetStream().Events()
+	}
+	if reqID, ok := awsmiddleware.GetRequestIDMetadata(stream.ResultMetadata); ok {
+		w.requestID = reqID
+	}
+	return w
+}
+
+func (csw *ConverseStreamingWrapper) Next() bool {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+
+	if csw.done || csw.events == nil {
+		return false
+	}
+
+	event, ok := <-csw.events
+	if !ok {
+		csw.done = true
+		if csw.stream != nil && csw.stream.GetStream() != nil {
+			csw.streamErr = csw.stream.GetStream().Err()
+		}
+		return false
+	}
+
+	csw.currentEvent = event
+	csw.currentText = ""
+
+	if delta, ok := event.(*brtypes.ConverseStreamOutputMemberContentBlockDelta); ok {
+		if textDelta, ok := delta.Value.Delta.(*brtypes.ContentBlockDeltaMemberText); ok {
+			csw.currentText = textDelta.Value
+		}
+	}
+
+	return true
+}
+
+func (csw *ConverseStreamingWrapper) Current() interface{} {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.currentEvent
+}
+
+func (csw *ConverseStreamingWrapper) Err() error {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.streamErr
+}
+
+func (csw *ConverseStreamingWrapper) Close() error {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	if csw.stream != nil && csw.stream.GetStream() != nil {
+		return csw.stream.GetStream().Close()
 	}
 	return nil
 }

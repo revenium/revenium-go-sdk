@@ -50,6 +50,7 @@ type MeteringPayload struct {
 	ParentTransactionID  string                 `json:"parentTransactionId,omitempty"`
 	TraceType            string                 `json:"traceType,omitempty"`
 	TraceName            string                 `json:"traceName,omitempty"`
+	TicketID             string                 `json:"ticketId,omitempty"`
 	Environment          string                 `json:"environment,omitempty"`
 	Region               string                 `json:"region,omitempty"`
 	RetryNumber          *int                   `json:"retryNumber,omitempty"`

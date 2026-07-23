@@ -18,6 +18,7 @@ type Config struct {
 	AWSProfile         string
 	AWSModelARNBase    string
 	BedrockDisabled    bool
+	BedrockUseConverse bool
 }
 
 type Option func(*Config)
@@ -58,6 +59,12 @@ func WithBedrockDisabled(disabled bool) Option {
 	}
 }
 
+func WithBedrockUseConverse(enabled bool) Option {
+	return func(c *Config) {
+		c.BedrockUseConverse = enabled
+	}
+}
+
 func (c *Config) loadFromEnv() error {
 	core.LoadEnvFiles()
 
@@ -84,6 +91,10 @@ func (c *Config) loadFromEnv() error {
 
 	if os.Getenv("REVENIUM_BEDROCK_DISABLE") == "1" || os.Getenv("REVENIUM_BEDROCK_DISABLE") == "true" {
 		c.BedrockDisabled = true
+	}
+
+	if os.Getenv("REVENIUM_BEDROCK_USE_CONVERSE") == "1" || os.Getenv("REVENIUM_BEDROCK_USE_CONVERSE") == "true" {
+		c.BedrockUseConverse = true
 	}
 
 	core.InitializeLogger()
