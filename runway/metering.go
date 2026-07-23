@@ -122,6 +122,9 @@ func usageMetadataToMap(metadata *UsageMetadata) map[string]interface{} {
 	if metadata.TraceName != "" {
 		m["traceName"] = metadata.TraceName
 	}
+	if metadata.TicketID != "" {
+		m["ticketId"] = metadata.TicketID
+	}
 	if metadata.Environment != "" {
 		m["environment"] = metadata.Environment
 	}

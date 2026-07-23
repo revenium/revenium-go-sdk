@@ -85,6 +85,7 @@ func TestUsageMetadataToMap_PopulatesAllFields(t *testing.T) {
 		ParentTransactionID:  "parent-1",
 		TraceType:            "type-x",
 		TraceName:            "name-x",
+		TicketID:             "FRONT-1544",
 		Environment:          "prod",
 		Region:               "us-east",
 		RetryNumber:          &retry,
@@ -102,6 +103,7 @@ func TestUsageMetadataToMap_PopulatesAllFields(t *testing.T) {
 	assert.Equal(t, "video-gen", out["taskType"])
 	assert.Equal(t, "trace-1", out["traceId"])
 	assert.Equal(t, "name-x", out["traceName"])
+	assert.Equal(t, "FRONT-1544", out["ticketId"])
 	assert.Equal(t, "us-east", out["region"])
 	assert.Equal(t, float64(2), out["retryNumber"])
 	assert.Equal(t, 0.95, out["responseQualityScore"])

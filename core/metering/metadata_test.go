@@ -18,6 +18,7 @@ func TestApplyMetadata_StringFields(t *testing.T) {
 		"parentTransactionId": "parent-1",
 		"traceType":           "chain",
 		"traceName":           "my-chain",
+		"ticketId":            "FRONT-1544",
 		"environment":         "production",
 		"region":              "us-east-1",
 		"credentialAlias":     "default",
@@ -35,6 +36,7 @@ func TestApplyMetadata_StringFields(t *testing.T) {
 	assert.Equal(t, "parent-1", p.ParentTransactionID)
 	assert.Equal(t, "chain", p.TraceType)
 	assert.Equal(t, "my-chain", p.TraceName)
+	assert.Equal(t, "FRONT-1544", p.TicketID)
 	assert.Equal(t, "production", p.Environment)
 	assert.Equal(t, "us-east-1", p.Region)
 	assert.Equal(t, "default", p.CredentialAlias)

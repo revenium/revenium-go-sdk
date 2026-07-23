@@ -14,3 +14,7 @@ func mapAspectRatioToResolution(aspectRatio string) string {
 	}
 	return aspectRatio
 }
+
+func mapUpscaleFactorToResolution(factor string) string {
+	return "upscale_" + factor
+}

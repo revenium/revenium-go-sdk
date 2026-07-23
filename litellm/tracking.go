@@ -27,6 +27,7 @@ var headerMetadataFields = map[string]string{
 	"X-Revenium-Credential-Alias":           "credentialAlias",
 	"X-Revenium-Trace-Type":                 "traceType",
 	"X-Revenium-Trace-Name":                 "traceName",
+	"X-Revenium-Ticket-Id":                  "ticketId",
 }
 
 // ExtractMetadataFromHeaders maps Revenium-prefixed HTTP headers to the usage metadata shape

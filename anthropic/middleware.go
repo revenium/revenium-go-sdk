@@ -290,7 +290,11 @@ func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params ant
 
 	err = resilience.WithRetry(ctx, func() error {
 		var bedrockErr error
-		resp, bedrockErr = bedrockAdapter.CreateMessage(ctx, params)
+		if m.config.BedrockUseConverse {
+			resp, bedrockErr = bedrockAdapter.CreateMessageConverse(ctx, params)
+		} else {
+			resp, bedrockErr = bedrockAdapter.CreateMessage(ctx, params)
+		}
 		return bedrockErr
 	}, nil)
 
@@ -344,7 +348,11 @@ func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, para
 
 	err = resilience.WithRetry(ctx, func() error {
 		var bedrockErr error
-		stream, bedrockErr = bedrockAdapter.CreateMessageStream(ctx, params)
+		if m.config.BedrockUseConverse {
+			stream, bedrockErr = bedrockAdapter.CreateMessageStreamConverse(ctx, params)
+		} else {
+			stream, bedrockErr = bedrockAdapter.CreateMessageStream(ctx, params)
+		}
 		return bedrockErr
 	}, nil)
 
