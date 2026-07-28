@@ -4,7 +4,7 @@ go 1.23.0
 
 require (
 	github.com/openai/openai-go/v3 v3.8.0
-	github.com/revenium/revenium-go-sdk/core v0.0.0
+	github.com/revenium/revenium-go-sdk/core v1.1.4
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -23,5 +23,3 @@ require (
 	golang.org/x/text v0.27.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/revenium/revenium-go-sdk/core => ../core
