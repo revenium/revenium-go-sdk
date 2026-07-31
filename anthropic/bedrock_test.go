@@ -245,6 +245,123 @@ func TestConvertConverseStopReason(t *testing.T) {
 	assert.Equal(t, "future_reason", convertConverseStopReason("future_reason"))
 }
 
+func TestBedrockStreamingWrapper_AccumulatesTokens(t *testing.T) {
+	events := make(chan brtypes.ResponseStream, 3)
+	events <- &brtypes.ResponseStreamMemberChunk{
+		Value: brtypes.PayloadPart{
+			Bytes: []byte(`{"delta":{"type":"content_block_delta","text":"Hello"}}`),
+		},
+	}
+	events <- &brtypes.ResponseStreamMemberChunk{
+		Value: brtypes.PayloadPart{
+			Bytes: []byte(`{"delta":{"stop_reason":"end_turn"},"amazon-bedrock-invocationMetrics":{"inputTokenCount":100,"outputTokenCount":25}}`),
+		},
+	}
+	close(events)
+
+	wrapper := &BedrockStreamingWrapper{
+		events:  events,
+		modelID: "anthropic.claude-3-5-sonnet",
+	}
+
+	chunks := 0
+	for wrapper.Next() {
+		chunks++
+	}
+	assert.Equal(t, 2, chunks)
+	assert.Nil(t, wrapper.Err())
+
+	input, output, total := wrapper.GetAccumulatedTokens()
+	assert.Equal(t, int64(100), input)
+	assert.Equal(t, int64(25), output)
+	assert.Equal(t, int64(125), total)
+	assert.Equal(t, "end_turn", wrapper.GetStopReason())
+}
+
+func TestBedrockStreamingWrapper_AccumulatesCacheTokens(t *testing.T) {
+	events := make(chan brtypes.ResponseStream, 2)
+	events <- &brtypes.ResponseStreamMemberChunk{
+		Value: brtypes.PayloadPart{
+			Bytes: []byte(`{"delta":{"text":"Hi"},"usage":{"input_tokens":50,"output_tokens":10,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}`),
+		},
+	}
+	close(events)
+
+	wrapper := &BedrockStreamingWrapper{events: events, modelID: "test"}
+	for wrapper.Next() {
+	}
+
+	creation, read := wrapper.GetCacheTokens()
+	assert.Equal(t, int64(5), creation)
+	assert.Equal(t, int64(30), read)
+}
+
+func TestBedrockStreamingWrapper_ZeroTokensWhenNoMetrics(t *testing.T) {
+	events := make(chan brtypes.ResponseStream, 1)
+	events <- &brtypes.ResponseStreamMemberChunk{
+		Value: brtypes.PayloadPart{
+			Bytes: []byte(`{"delta":{"text":"Hello"}}`),
+		},
+	}
+	close(events)
+
+	wrapper := &BedrockStreamingWrapper{events: events, modelID: "test"}
+	for wrapper.Next() {
+	}
+
+	input, output, _ := wrapper.GetAccumulatedTokens()
+	assert.Equal(t, int64(0), input)
+	assert.Equal(t, int64(0), output)
+}
+
+func TestConverseStreamingWrapper_AccumulatesTokens(t *testing.T) {
+	events := make(chan brtypes.ConverseStreamOutput, 3)
+	events <- &brtypes.ConverseStreamOutputMemberContentBlockDelta{
+		Value: brtypes.ContentBlockDeltaEvent{
+			Delta:             &brtypes.ContentBlockDeltaMemberText{Value: "Hello"},
+			ContentBlockIndex: aws.Int32(0),
+		},
+	}
+	events <- &brtypes.ConverseStreamOutputMemberMessageStop{
+		Value: brtypes.MessageStopEvent{StopReason: brtypes.StopReasonEndTurn},
+	}
+	events <- &brtypes.ConverseStreamOutputMemberMetadata{
+		Value: brtypes.ConverseStreamMetadataEvent{
+			Usage: &brtypes.TokenUsage{
+				InputTokens:           aws.Int32(200),
+				OutputTokens:          aws.Int32(50),
+				TotalTokens:           aws.Int32(250),
+				CacheReadInputTokens:  aws.Int32(80),
+				CacheWriteInputTokens: aws.Int32(10),
+			},
+		},
+	}
+	close(events)
+
+	wrapper := &ConverseStreamingWrapper{events: events, modelID: "test"}
+	chunks := 0
+	for wrapper.Next() {
+		chunks++
+	}
+	assert.Equal(t, 3, chunks)
+
+	input, output, total := wrapper.GetAccumulatedTokens()
+	assert.Equal(t, int64(200), input)
+	assert.Equal(t, int64(50), output)
+	assert.Equal(t, int64(250), total)
+
+	creation, read := wrapper.GetCacheTokens()
+	assert.Equal(t, int64(10), creation)
+	assert.Equal(t, int64(80), read)
+
+	assert.Equal(t, "end_turn", wrapper.GetStopReason())
+}
+
+func TestStreamTokenAccumulator_Interface(t *testing.T) {
+	var _ StreamTokenAccumulator = &BedrockStreamingWrapper{}
+	var _ StreamTokenAccumulator = &ConverseStreamingWrapper{}
+}
+
 func makeTestParams(model, text string) anthropicsdk.MessageNewParams {
 	return anthropicsdk.MessageNewParams{
 		Model:     anthropicsdk.Model(model),

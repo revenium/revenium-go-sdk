@@ -5,18 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.5] - 2026-07-28
+## [1.1.6] - 2026-07-31
 
-### Fixed
+### Added
 
-- **Module resolution**: the published provider modules now resolve for consumers outside this
-  repository. Each provider required `revenium-go-sdk/core` at `v0.0.0` alongside a relative
-  `replace` directive; a relative `replace` applies only in the main module, so it was ignored
-  for consumers and every provider failed to install. Core is now required at its published
-  version.
-- **Repository root**: the repository root is declared as a module and its previously published
-  versions are retracted. The root contains no importable package, so those versions resolved
-  successfully while delivering no code.
+- **Webhooks**: add HMAC signature verification helper with secret rotation support (FRONT-1690)
+- **Bedrock**: capture token counts in streaming wrappers for InvokeModel and Converse (BACK-2418)
 
 ## [1.1.4] - 2026-07-23
 
@@ -114,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-module layout** so consumers pull only the providers they need
 - **CI/CD pipeline** with GitHub Actions for automated testing across all modules
 
-[1.1.5]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.5
+[1.1.6]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.6
 [1.1.4]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.4
 [1.1.3]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.3
 [1.1.2]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.2

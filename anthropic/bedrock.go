@@ -23,6 +23,12 @@ import (
 	"github.com/revenium/revenium-go-sdk/core"
 )
 
+type StreamTokenAccumulator interface {
+	GetAccumulatedTokens() (input, output, total int64)
+	GetCacheTokens() (creation, read int64)
+	GetStopReason() string
+}
+
 type BedrockClient interface {
 	InvokeModel(ctx context.Context, params *bedrockruntime.InvokeModelInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelOutput, error)
 	InvokeModelWithResponseStream(ctx context.Context, params *bedrockruntime.InvokeModelWithResponseStreamInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelWithResponseStreamOutput, error)
@@ -639,6 +645,12 @@ type BedrockStreamingWrapper struct {
 	modelID      string
 	startTime    time.Time
 	mu           sync.Mutex
+
+	inputTokens         int64
+	outputTokens        int64
+	cacheReadTokens     int64
+	cacheCreationTokens int64
+	stopReason          string
 }
 
 func newBedrockStreamingWrapper(stream *bedrockruntime.InvokeModelWithResponseStreamOutput, modelID string) *BedrockStreamingWrapper {
@@ -680,6 +692,31 @@ func (bsw *BedrockStreamingWrapper) Next() bool {
 				if text, ok := delta["text"].(string); ok {
 					bsw.currentText = text
 				}
+				if sr, ok := delta["stop_reason"].(string); ok && sr != "" {
+					bsw.stopReason = sr
+				}
+			}
+			if metrics, ok := parsed["amazon-bedrock-invocationMetrics"].(map[string]interface{}); ok {
+				if v, ok := metrics["inputTokenCount"].(float64); ok {
+					bsw.inputTokens = int64(v)
+				}
+				if v, ok := metrics["outputTokenCount"].(float64); ok {
+					bsw.outputTokens = int64(v)
+				}
+			}
+			if usage, ok := parsed["usage"].(map[string]interface{}); ok {
+				if v, ok := usage["input_tokens"].(float64); ok {
+					bsw.inputTokens = int64(v)
+				}
+				if v, ok := usage["output_tokens"].(float64); ok {
+					bsw.outputTokens = int64(v)
+				}
+				if v, ok := usage["cache_read_input_tokens"].(float64); ok {
+					bsw.cacheReadTokens = int64(v)
+				}
+				if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
+					bsw.cacheCreationTokens = int64(v)
+				}
 			}
 		}
 	}
@@ -697,6 +734,24 @@ func (bsw *BedrockStreamingWrapper) Err() error {
 	bsw.mu.Lock()
 	defer bsw.mu.Unlock()
 	return bsw.streamErr
+}
+
+func (bsw *BedrockStreamingWrapper) GetAccumulatedTokens() (input, output, total int64) {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.inputTokens, bsw.outputTokens, bsw.inputTokens + bsw.outputTokens
+}
+
+func (bsw *BedrockStreamingWrapper) GetCacheTokens() (creation, read int64) {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.cacheCreationTokens, bsw.cacheReadTokens
+}
+
+func (bsw *BedrockStreamingWrapper) GetStopReason() string {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.stopReason
 }
 
 func (bsw *BedrockStreamingWrapper) Close() error {
@@ -719,6 +774,12 @@ type ConverseStreamingWrapper struct {
 	requestID    string
 	startTime    time.Time
 	mu           sync.Mutex
+
+	inputTokens         int64
+	outputTokens        int64
+	cacheReadTokens     int64
+	cacheCreationTokens int64
+	stopReason          string
 }
 
 func newConverseStreamingWrapper(stream *bedrockruntime.ConverseStreamOutput, modelID string) *ConverseStreamingWrapper {
@@ -756,13 +817,49 @@ func (csw *ConverseStreamingWrapper) Next() bool {
 	csw.currentEvent = event
 	csw.currentText = ""
 
-	if delta, ok := event.(*brtypes.ConverseStreamOutputMemberContentBlockDelta); ok {
-		if textDelta, ok := delta.Value.Delta.(*brtypes.ContentBlockDeltaMemberText); ok {
+	switch ev := event.(type) {
+	case *brtypes.ConverseStreamOutputMemberContentBlockDelta:
+		if textDelta, ok := ev.Value.Delta.(*brtypes.ContentBlockDeltaMemberText); ok {
 			csw.currentText = textDelta.Value
 		}
+	case *brtypes.ConverseStreamOutputMemberMetadata:
+		if ev.Value.Usage != nil {
+			if ev.Value.Usage.InputTokens != nil {
+				csw.inputTokens = int64(*ev.Value.Usage.InputTokens)
+			}
+			if ev.Value.Usage.OutputTokens != nil {
+				csw.outputTokens = int64(*ev.Value.Usage.OutputTokens)
+			}
+			if ev.Value.Usage.CacheReadInputTokens != nil {
+				csw.cacheReadTokens = int64(*ev.Value.Usage.CacheReadInputTokens)
+			}
+			if ev.Value.Usage.CacheWriteInputTokens != nil {
+				csw.cacheCreationTokens = int64(*ev.Value.Usage.CacheWriteInputTokens)
+			}
+		}
+	case *brtypes.ConverseStreamOutputMemberMessageStop:
+		csw.stopReason = convertConverseStopReason(ev.Value.StopReason)
 	}
 
 	return true
+}
+
+func (csw *ConverseStreamingWrapper) GetAccumulatedTokens() (input, output, total int64) {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.inputTokens, csw.outputTokens, csw.inputTokens + csw.outputTokens
+}
+
+func (csw *ConverseStreamingWrapper) GetCacheTokens() (creation, read int64) {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.cacheCreationTokens, csw.cacheReadTokens
+}
+
+func (csw *ConverseStreamingWrapper) GetStopReason() string {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.stopReason
 }
 
 func (csw *ConverseStreamingWrapper) Current() interface{} {

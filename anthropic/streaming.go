@@ -251,6 +251,25 @@ func (sw *StreamingWrapper) Close() error {
 		}
 	}
 
+	if acc, ok := sw.stream.(StreamTokenAccumulator); ok {
+		input, output, total := acc.GetAccumulatedTokens()
+		if input > 0 || output > 0 {
+			sw.inputTokens = int(input)
+			sw.outputTokens = int(output)
+			sw.totalTokens = int(total)
+		}
+		creation, read := acc.GetCacheTokens()
+		if creation > 0 {
+			sw.cacheCreationTokens = int(creation)
+		}
+		if read > 0 {
+			sw.cacheReadTokens = int(read)
+		}
+		if sr := acc.GetStopReason(); sr != "" && sw.stopReason == "" {
+			sw.stopReason = sr
+		}
+	}
+
 	duration := time.Since(sw.startTime)
 	timeToFirstToken := int64(0)
 	var completionStartTime *time.Time
