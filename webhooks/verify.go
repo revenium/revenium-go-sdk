@@ -26,7 +26,7 @@ type VerifyOptions struct {
 
 func VerifySignature(opts VerifyOptions) bool {
 	tolerance := opts.ToleranceSeconds
-	if tolerance == 0 {
+	if tolerance <= 0 {
 		tolerance = defaultToleranceSeconds
 	}
 
