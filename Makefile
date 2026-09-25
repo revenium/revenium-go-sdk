@@ -1,41 +1,35 @@
 .PHONY: help test-all lint-all fmt-all vet-all deps build-all clean
 
-MODULES := $(shell find . -name 'go.mod' -not -path './go.mod' -exec dirname {} \;)
+MODULES := $(shell find . -name 'go.mod' -not -path './go.mod' -not -path './examples/go.mod' -exec dirname {} \;)
+
+define for_each_module
+	@for mod in $(MODULES); do \
+		echo "=== $(1) $$mod ==="; \
+		(cd $$mod && $(2)) || exit 1; \
+	done
+	@echo "=== $(1) ./examples ==="
+	@(cd examples && GOWORK=off $(2)) || exit 1
+endef
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 test-all: ## Run tests for all modules
-	@for mod in $(MODULES); do \
-		echo "=== Testing $$mod ==="; \
-		(cd $$mod && go test -v -race ./...) || exit 1; \
-	done
+	$(call for_each_module,Testing,go test -v -race ./...)
 
 lint-all: ## Run go vet for all modules
-	@for mod in $(MODULES); do \
-		echo "=== Vetting $$mod ==="; \
-		(cd $$mod && go vet ./...) || exit 1; \
-	done
+	$(call for_each_module,Vetting,go vet ./...)
 
 fmt-all: ## Format all modules
-	@for mod in $(MODULES); do \
-		echo "=== Formatting $$mod ==="; \
-		(cd $$mod && gofmt -w .) || exit 1; \
-	done
+	$(call for_each_module,Formatting,gofmt -w .)
 
 vet-all: lint-all ## Alias for lint-all
 
 deps: ## Download dependencies for all modules
-	@for mod in $(MODULES); do \
-		echo "=== Downloading deps for $$mod ==="; \
-		(cd $$mod && go mod download) || exit 1; \
-	done
+	$(call for_each_module,Downloading deps for,go mod download)
 
 build-all: ## Build all modules
-	@for mod in $(MODULES); do \
-		echo "=== Building $$mod ==="; \
-		(cd $$mod && go build ./...) || exit 1; \
-	done
+	$(call for_each_module,Building,go build ./...)
 
 clean: ## Clean build artifacts
 	@find . -name '*.test' -delete

@@ -18,6 +18,10 @@ var stringFields = map[string]*func(*MeteringPayload) *string{
 	"traceType":           strSetter(func(p *MeteringPayload) *string { return &p.TraceType }),
 	"traceName":           strSetter(func(p *MeteringPayload) *string { return &p.TraceName }),
 	"ticketId":            strSetter(func(p *MeteringPayload) *string { return &p.TicketID }),
+	"agenticJobId":        strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobID }),
+	"agenticJobName":      strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobName }),
+	"agenticJobType":      strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobType }),
+	"agenticJobVersion":   strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobVersion }),
 	"environment":         strSetter(func(p *MeteringPayload) *string { return &p.Environment }),
 	"region":              strSetter(func(p *MeteringPayload) *string { return &p.Region }),
 	"credentialAlias":     strSetter(func(p *MeteringPayload) *string { return &p.CredentialAlias }),
@@ -33,14 +37,14 @@ var stringFields = map[string]*func(*MeteringPayload) *string{
 }
 
 var floatFields = map[string]func(*MeteringPayload, float64){
-	"temperature":           func(p *MeteringPayload, v float64) { p.Temperature = &v },
-	"mediationLatency":      func(p *MeteringPayload, v float64) { p.MediationLatency = &v },
-	"responseQualityScore":  func(p *MeteringPayload, v float64) { p.ResponseQualityScore = &v },
-	"inputTokenCost":        func(p *MeteringPayload, v float64) { p.InputTokenCost = &v },
-	"outputTokenCost":       func(p *MeteringPayload, v float64) { p.OutputTokenCost = &v },
+	"temperature":            func(p *MeteringPayload, v float64) { p.Temperature = &v },
+	"mediationLatency":       func(p *MeteringPayload, v float64) { p.MediationLatency = &v },
+	"responseQualityScore":   func(p *MeteringPayload, v float64) { p.ResponseQualityScore = &v },
+	"inputTokenCost":         func(p *MeteringPayload, v float64) { p.InputTokenCost = &v },
+	"outputTokenCost":        func(p *MeteringPayload, v float64) { p.OutputTokenCost = &v },
 	"cacheCreationTokenCost": func(p *MeteringPayload, v float64) { p.CacheCreationTokenCost = &v },
-	"cacheReadTokenCost":    func(p *MeteringPayload, v float64) { p.CacheReadTokenCost = &v },
-	"totalCost":             func(p *MeteringPayload, v float64) { p.TotalCost = &v },
+	"cacheReadTokenCost":     func(p *MeteringPayload, v float64) { p.CacheReadTokenCost = &v },
+	"totalCost":              func(p *MeteringPayload, v float64) { p.TotalCost = &v },
 }
 
 func strSetter(fn func(*MeteringPayload) *string) *func(*MeteringPayload) *string {
@@ -71,6 +75,13 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 			continue
 		}
 		if s, ok := val.(string); ok && s != "" {
+			if key == "agenticJobId" {
+				// An id the platform would reject costs the whole event, so
+				// drop it rather than let the API answer 400.
+				if s = sanitizeAgenticJobID(s, "request metadata"); s == "" {
+					continue
+				}
+			}
 			*(*setter)(payload) = s
 		}
 	}
@@ -116,5 +127,9 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 
 	if v, ok := metadata["subscriber"].(map[string]interface{}); ok {
 		payload.Subscriber = v
+	}
+
+	if s, ok := metadata["operationSubtype"].(string); ok {
+		applyOperationSubtype(payload, s)
 	}
 }

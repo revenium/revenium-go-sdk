@@ -144,3 +144,112 @@ func TestApplyMetadata_IdempotencyKey(t *testing.T) {
 	})
 	assert.Equal(t, "meta-key-456", p.IdempotencyKey)
 }
+
+func TestPayloadBuilder_AgenticJobWireFormat(t *testing.T) {
+	agenticJobKeys := []string{"agenticJobId", "agenticJobName", "agenticJobType", "agenticJobVersion"}
+
+	tests := []struct {
+		name string
+		set  func(*MeteringPayload)
+		// want maps a JSON key to its expected value. Any key in
+		// agenticJobKeys absent from want must be absent from the JSON body.
+		want map[string]string
+	}{
+		{
+			name: "all four set",
+			set: func(p *MeteringPayload) {
+				p.AgenticJobID = "job-abc.123_x"
+				p.AgenticJobName = "nightly summarization"
+				p.AgenticJobType = "batch-summarize"
+				p.AgenticJobVersion = "v2.1.0"
+			},
+			want: map[string]string{
+				"agenticJobId":      "job-abc.123_x",
+				"agenticJobName":    "nightly summarization",
+				"agenticJobType":    "batch-summarize",
+				"agenticJobVersion": "v2.1.0",
+			},
+		},
+		{
+			name: "none set",
+			set:  func(p *MeteringPayload) {},
+			want: map[string]string{},
+		},
+		{
+			name: "id only",
+			set: func(p *MeteringPayload) {
+				p.AgenticJobID = "job-solo"
+			},
+			want: map[string]string{"agenticJobId": "job-solo"},
+		},
+		{
+			name: "type preserved verbatim - the backend lowercases on ingest",
+			set: func(p *MeteringPayload) {
+				p.AgenticJobID = "job-mixed"
+				p.AgenticJobType = "Batch-Summarize"
+			},
+			want: map[string]string{
+				"agenticJobId":   "job-mixed",
+				"agenticJobType": "Batch-Summarize",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
+			tt.set(p)
+
+			data, err := json.Marshal(p)
+			require.NoError(t, err)
+
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &m))
+
+			for _, key := range agenticJobKeys {
+				if want, ok := tt.want[key]; ok {
+					assert.Equal(t, want, m[key], "%s should serialize verbatim", key)
+					continue
+				}
+				_, present := m[key]
+				assert.False(t, present, "unset %s must be absent from the body, not an empty string", key)
+			}
+		})
+	}
+}
+
+func TestPayloadBuilder_OperationSubtype(t *testing.T) {
+	tests := []struct {
+		name string
+		op   OperationType
+		set  string
+		want string
+	}{
+		{"image generation", OperationImage, SubtypeGeneration, "generation"},
+		{"audio tts", OperationAudio, SubtypeTTS, "tts"},
+		{"video extend", OperationVideo, SubtypeExtend, "extend"},
+		{"normalized case and whitespace", OperationImage, "  Edit ", "edit"},
+		{"empty is a no-op", OperationAudio, "", ""},
+		{"value outside the modality vocabulary is dropped", OperationAudio, "speech_synthesis", ""},
+		{"image value on a video payload is dropped", OperationVideo, SubtypeVariation, ""},
+		{"chat never carries a subtype", OperationChat, SubtypeGeneration, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPayload(tt.op, "m", "PROVIDER").WithOperationSubtype(tt.set).Build()
+			assert.Equal(t, tt.want, p.OperationSubtype)
+
+			data, err := json.Marshal(p)
+			require.NoError(t, err)
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &m))
+			got, present := m["operationSubtype"]
+			if tt.want == "" {
+				assert.False(t, present, "empty operationSubtype must be omitted from the wire body")
+				return
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

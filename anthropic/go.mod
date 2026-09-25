@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.17
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.41.1
 	github.com/aws/smithy-go v1.23.1
-	github.com/revenium/revenium-go-sdk/core v1.1.4
+	github.com/revenium/revenium-go-sdk/core v1.1.7
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -38,3 +38,5 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/revenium/revenium-go-sdk/core => ../core

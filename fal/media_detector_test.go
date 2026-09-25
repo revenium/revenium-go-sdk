@@ -79,3 +79,70 @@ func TestDetectMediaType_PrefersResponseShape(t *testing.T) {
 	op := DetectMediaType("fal-ai/flux/dev", map[string]interface{}{"video": map[string]interface{}{"url": "v"}})
 	assert.Equal(t, metering.OperationVideo, op)
 }
+
+func TestDetectAudioSubtype(t *testing.T) {
+	cases := map[string]string{
+		"fal-ai/whisper":                  metering.SubtypeTranscription,
+		"fal-ai/lava-sr":                  metering.SubtypeTranscription,
+		"fal-ai/speech-to-text/turbo":     metering.SubtypeTranscription,
+		"fal-ai/kokoro/text-to-speech":    metering.SubtypeTTS,
+		"fal-ai/f5-tts":                   metering.SubtypeTTS,
+		"fal-ai/chatterbox":               metering.SubtypeTTS,
+		"fal-ai/stable-audio":             metering.SubtypeSynthesis,
+		"fal-ai/elevenlabs/sound-effects": metering.SubtypeSynthesis,
+		"fal-ai/minimax-music":            metering.SubtypeSynthesis,
+	}
+
+	for endpoint, want := range cases {
+		t.Run(endpoint, func(t *testing.T) {
+			assert.Equal(t, want, detectAudioSubtype(endpoint))
+		})
+	}
+}
+
+func TestDetectImageSubtype(t *testing.T) {
+	cases := map[string]string{
+		"fal-ai/flux/schnell":                 metering.SubtypeGeneration,
+		"fal-ai/recraft-v3":                   metering.SubtypeGeneration,
+		"fal-ai/aura-sr":                      metering.SubtypeUpscale,
+		"fal-ai/clarity-upscaler":             metering.SubtypeUpscale,
+		"fal-ai/topaz/upscale/image":          metering.SubtypeUpscale,
+		"fal-ai/esrgan":                       metering.SubtypeUpscale,
+		"fal-ai/flux-pro/v1/fill":             metering.SubtypeInpainting,
+		"fal-ai/inpaint":                      metering.SubtypeInpainting,
+		"fal-ai/bria/eraser":                  metering.SubtypeInpainting,
+		"fal-ai/nano-banana/edit":             metering.SubtypeEdit,
+		"fal-ai/flux/dev/image-to-image":      metering.SubtypeEdit,
+		"fal-ai/flux-kontext/dev":             metering.SubtypeEdit,
+		"fal-ai/face-swap":                    metering.SubtypeEdit,
+		"fal-ai/bria/background/remove":       metering.SubtypeEdit,
+		"fal-ai/imageutils/rembg":             metering.SubtypeEdit,
+		"fal-ai/flux/dev/image-to-image/fill": metering.SubtypeInpainting,
+	}
+
+	for endpoint, want := range cases {
+		t.Run(endpoint, func(t *testing.T) {
+			assert.Equal(t, want, detectImageSubtype(endpoint))
+		})
+	}
+}
+
+func TestDetectVideoSubtype(t *testing.T) {
+	cases := map[string]string{
+		"fal-ai/kling-video/v1/standard/text-to-video": metering.SubtypeGeneration,
+		"fal-ai/veo-3":                           metering.SubtypeGeneration,
+		"fal-ai/topaz/upscale/video":             metering.SubtypeUpscale,
+		"fal-ai/video-upscaler":                  metering.SubtypeUpscale,
+		"fal-ai/luma-dream-machine/ray-2/extend": metering.SubtypeExtend,
+		"fal-ai/ltx-video/extend":                metering.SubtypeExtend,
+		"fal-ai/hunyuan-video/video-to-video":    metering.SubtypeEdit,
+		"fal-ai/wan-vace":                        metering.SubtypeEdit,
+		"fal-ai/kling-video/v2/master/edit":      metering.SubtypeEdit,
+	}
+
+	for endpoint, want := range cases {
+		t.Run(endpoint, func(t *testing.T) {
+			assert.Equal(t, want, detectVideoSubtype(endpoint))
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/revenium/revenium-go-sdk/core/metering"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -42,13 +43,14 @@ func TestBuildVideoMeteringPayload_BasicFields(t *testing.T) {
 		},
 		OutputURLs: []string{"https://x/out.mp4"},
 	}
-	payload := buildVideoMeteringPayload(result, nil, false, time.Now().Add(-12*time.Second))
+	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, nil, false, time.Now().Add(-12*time.Second))
 	require.NotNil(t, payload)
 	assert.Equal(t, "VIDEO", payload.OperationType)
 	assert.Equal(t, "gen3a_turbo", payload.Model)
 	assert.Equal(t, "RUNWAY", payload.ModelSource)
 	assert.Equal(t, "task-1", payload.TransactionID)
 	assert.Equal(t, "END", payload.StopReason)
+	assert.Equal(t, metering.SubtypeGeneration, payload.OperationSubtype)
 }
 
 func TestBuildVideoMeteringPayload_AppliesUsageMetadata(t *testing.T) {
@@ -59,13 +61,27 @@ func TestBuildVideoMeteringPayload_AppliesUsageMetadata(t *testing.T) {
 	md := &UsageMetadata{
 		OrganizationName: "org-1",
 		ProductName:      "prod-1",
-		TraceID:        "trace-1",
+		TraceID:          "trace-1",
 	}
-	payload := buildVideoMeteringPayload(result, md, false, time.Now())
+	payload := buildVideoMeteringPayload(result, metering.SubtypeEdit, md, false, time.Now())
 	require.NotNil(t, payload)
 	assert.Equal(t, "org-1", payload.OrganizationName)
 	assert.Equal(t, "prod-1", payload.ProductName)
 	assert.Equal(t, "trace-1", payload.TraceID)
+	assert.Equal(t, metering.SubtypeEdit, payload.OperationSubtype)
+}
+
+func TestBuildVideoMeteringPayload_CustomMetadataOverridesSubtype(t *testing.T) {
+	result := &VideoGenerationResult{
+		ID: "task-3", Model: "m", Status: TaskStatusSucceeded,
+		Metadata: map[string]interface{}{},
+	}
+	md := &UsageMetadata{
+		Custom: map[string]interface{}{"operationSubtype": "extend"},
+	}
+	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, md, false, time.Now())
+	require.NotNil(t, payload)
+	assert.Equal(t, metering.SubtypeExtend, payload.OperationSubtype)
 }
 
 func TestUsageMetadataToMap_NilReturnsNil(t *testing.T) {

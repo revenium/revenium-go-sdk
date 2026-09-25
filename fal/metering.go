@@ -45,7 +45,8 @@ func buildImageMeteringPayload(
 ) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationImage, normalizeModelName(model), "fal_ai").
 		WithTiming(requestTime, duration).
-		WithModelSource("FAL")
+		WithModelSource("FAL").
+		WithOperationSubtype(detectImageSubtype(model))
 
 	if imageResp != nil {
 		imageCount := len(imageResp.Images)
@@ -88,7 +89,8 @@ func buildVideoMeteringPayload(
 ) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationVideo, normalizeModelName(model), "fal_ai").
 		WithTiming(requestTime, duration).
-		WithModelSource("FAL")
+		WithModelSource("FAL").
+		WithOperationSubtype(detectVideoSubtype(model))
 
 	var reqDurSeconds float64
 	if requestedDuration != "" {
@@ -152,7 +154,8 @@ func buildAudioMeteringPayload(
 ) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationAudio, normalizeModelName(model), "fal_ai").
 		WithTiming(requestTime, duration).
-		WithModelSource("FAL")
+		WithModelSource("FAL").
+		WithOperationSubtype(detectAudioSubtype(model))
 
 	if audioResp != nil && audioResp.Audio.Duration > 0 {
 		b.WithAudioDuration(audioResp.Audio.Duration)

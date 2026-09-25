@@ -30,7 +30,7 @@ func (i *ImagesInterface) Generate(ctx context.Context, params openai.ImageGener
 	resp, err := i.client.Images.Generate(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := i.buildErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := i.buildErrorPayload(model, metering.SubtypeGeneration, metadata, duration, providerStr, requestTime, err.Error())
 		i.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -39,8 +39,7 @@ func (i *ImagesInterface) Generate(ctx context.Context, params openai.ImageGener
 	actual := len(resp.Data)
 
 	attrs := map[string]interface{}{
-		"billing_unit":     "per_image",
-		"operationSubtype": "generation",
+		"billing_unit": "per_image",
 	}
 	if s := string(params.Size); s != "" {
 		attrs["resolution"] = s
@@ -58,6 +57,7 @@ func (i *ImagesInterface) Generate(ctx context.Context, params openai.ImageGener
 	payload := metering.NewPayload(metering.OperationImage, model, providerStr).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, requested).
+		WithOperationSubtype(metering.SubtypeGeneration).
 		WithAttributes(attrs).
 		Build()
 
@@ -81,7 +81,7 @@ func (i *ImagesInterface) Edit(ctx context.Context, params openai.ImageEditParam
 	resp, err := i.client.Images.Edit(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := i.buildErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := i.buildErrorPayload(model, metering.SubtypeEdit, metadata, duration, providerStr, requestTime, err.Error())
 		i.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -90,9 +90,8 @@ func (i *ImagesInterface) Edit(ctx context.Context, params openai.ImageEditParam
 	actual := len(resp.Data)
 
 	attrs := map[string]interface{}{
-		"billing_unit":     "per_image",
-		"operationSubtype": "edit",
-		"has_mask":         params.Mask != nil,
+		"billing_unit": "per_image",
+		"has_mask":     params.Mask != nil,
 	}
 	if s := string(params.Size); s != "" {
 		attrs["resolution"] = s
@@ -104,6 +103,7 @@ func (i *ImagesInterface) Edit(ctx context.Context, params openai.ImageEditParam
 	payload := metering.NewPayload(metering.OperationImage, model, providerStr).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, requested).
+		WithOperationSubtype(metering.SubtypeEdit).
 		WithAttributes(attrs).
 		Build()
 
@@ -127,7 +127,7 @@ func (i *ImagesInterface) CreateVariation(ctx context.Context, params openai.Ima
 	resp, err := i.client.Images.NewVariation(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := i.buildErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := i.buildErrorPayload(model, metering.SubtypeVariation, metadata, duration, providerStr, requestTime, err.Error())
 		i.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -136,8 +136,7 @@ func (i *ImagesInterface) CreateVariation(ctx context.Context, params openai.Ima
 	actual := len(resp.Data)
 
 	attrs := map[string]interface{}{
-		"billing_unit":     "per_image",
-		"operationSubtype": "variation",
+		"billing_unit": "per_image",
 	}
 	if s := string(params.Size); s != "" {
 		attrs["resolution"] = s
@@ -149,6 +148,7 @@ func (i *ImagesInterface) CreateVariation(ctx context.Context, params openai.Ima
 	payload := metering.NewPayload(metering.OperationImage, model, providerStr).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, requested).
+		WithOperationSubtype(metering.SubtypeVariation).
 		WithAttributes(attrs).
 		Build()
 
@@ -158,9 +158,10 @@ func (i *ImagesInterface) CreateVariation(ctx context.Context, params openai.Ima
 	return resp, nil
 }
 
-func (i *ImagesInterface) buildErrorPayload(model string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
+func (i *ImagesInterface) buildErrorPayload(model, subtype string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
 	payload := metering.NewPayload(metering.OperationImage, model, provider).
 		WithTiming(requestTime, duration).
+		WithOperationSubtype(subtype).
 		WithError(errorReason).
 		Build()
 

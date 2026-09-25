@@ -18,7 +18,7 @@ func main() {
 	}
 
 	result, err := client.ReportJobOutcome("example-job-123", &jobs.JobOutcome{
-		Status: "completed",
+		ExecutionStatus: jobs.ExecutionStatusSuccess,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -31,6 +31,10 @@ func main() {
 	}
 	fmt.Printf("Total jobs: %d\n", len(pagedJobs.Content))
 	for _, j := range pagedJobs.Content {
-		fmt.Printf("  - %s (%s)\n", j.ID, j.Type)
+		jobType := ""
+		if j.Type != nil {
+			jobType = *j.Type
+		}
+		fmt.Printf("  - %s (%s)\n", j.ID, jobType)
 	}
 }
