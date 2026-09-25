@@ -13,6 +13,17 @@ var (
 	videoPatterns = regexp.MustCompile(`(?i)video|motion|animate|runway|luma|kling|veo|sora|ltx|minimax-video|cogvideo|hunyuan|\bwan-|mochi|haiper`)
 	audioPatterns = regexp.MustCompile(`(?i)audio|speech|voice|tts|whisper|chatterbox|lava-sr|sfx|sound|music|f5-tts|\bdia\b|kokoro|mars6|parler`)
 	chatPatterns  = regexp.MustCompile(`(?i)openrouter|llm|text-generation`)
+
+	transcriptionPatterns = regexp.MustCompile(`(?i)whisper|lava-sr|transcri|speech-to-text|speech_to_text|\bstt\b`)
+	textToSpeechPatterns  = regexp.MustCompile(`(?i)tts|text-to-speech|text_to_speech|speech|kokoro|chatterbox|parler`)
+
+	imageUpscalePatterns    = regexp.MustCompile(`(?i)upscal|esrgan|aura-sr|super-resolution`)
+	imageInpaintingPatterns = regexp.MustCompile(`(?i)inpaint|outpaint|/fill\b|eraser`)
+	imageEditPatterns       = regexp.MustCompile(`(?i)/edit|img2img|image-to-image|face-swap|rembg|background/remove|remove-background|try-on|cat-vton|kontext`)
+
+	videoUpscalePatterns = regexp.MustCompile(`(?i)upscal`)
+	videoExtendPatterns  = regexp.MustCompile(`(?i)extend`)
+	videoEditPatterns    = regexp.MustCompile(`(?i)video-to-video|/edit|vace`)
 )
 
 // DetectFromEndpointID infers the media operation type from a fal endpoint identifier
@@ -28,6 +39,40 @@ func DetectFromEndpointID(endpointID string) metering.OperationType {
 		return metering.OperationImage
 	}
 	return metering.OperationImage
+}
+
+func detectImageSubtype(endpointID string) string {
+	switch {
+	case imageUpscalePatterns.MatchString(endpointID):
+		return metering.SubtypeUpscale
+	case imageInpaintingPatterns.MatchString(endpointID):
+		return metering.SubtypeInpainting
+	case imageEditPatterns.MatchString(endpointID):
+		return metering.SubtypeEdit
+	}
+	return metering.SubtypeGeneration
+}
+
+func detectVideoSubtype(endpointID string) string {
+	switch {
+	case videoUpscalePatterns.MatchString(endpointID):
+		return metering.SubtypeUpscale
+	case videoExtendPatterns.MatchString(endpointID):
+		return metering.SubtypeExtend
+	case videoEditPatterns.MatchString(endpointID):
+		return metering.SubtypeEdit
+	}
+	return metering.SubtypeGeneration
+}
+
+func detectAudioSubtype(endpointID string) string {
+	switch {
+	case transcriptionPatterns.MatchString(endpointID):
+		return metering.SubtypeTranscription
+	case textToSpeechPatterns.MatchString(endpointID):
+		return metering.SubtypeTTS
+	}
+	return metering.SubtypeSynthesis
 }
 
 // CorrectFromResponse refines the inferred operation type using fields present in the response payload

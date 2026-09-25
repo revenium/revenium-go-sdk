@@ -29,6 +29,7 @@ func (m *ModelsInterface) GenerateImage(
 		core.Debug("GenerateImage error: %v", err)
 		payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 			WithTiming(requestTime, duration).
+			WithOperationSubtype(metering.SubtypeGeneration).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -38,9 +39,7 @@ func (m *ModelsInterface) GenerateImage(
 
 	actual := len(resp.GeneratedImages)
 	requested := actual
-	attrs := map[string]interface{}{
-		"operationSubtype": "generation",
-	}
+	attrs := map[string]interface{}{}
 	if config != nil {
 		if config.NumberOfImages > 0 {
 			requested = int(config.NumberOfImages)
@@ -55,6 +54,7 @@ func (m *ModelsInterface) GenerateImage(
 	payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, requested).
+		WithOperationSubtype(metering.SubtypeGeneration).
 		WithAttributes(attrs).
 		Build()
 	metering.ApplyMetadata(payload, metadata)
@@ -84,6 +84,7 @@ func (m *ModelsInterface) EditImage(
 		core.Debug("EditImage error: %v", err)
 		payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 			WithTiming(requestTime, duration).
+			WithOperationSubtype(metering.SubtypeEdit).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -93,9 +94,7 @@ func (m *ModelsInterface) EditImage(
 
 	actual := len(resp.GeneratedImages)
 	requested := actual
-	attrs := map[string]interface{}{
-		"operationSubtype": "edit",
-	}
+	attrs := map[string]interface{}{}
 	if config != nil {
 		if config.NumberOfImages > 0 {
 			requested = int(config.NumberOfImages)
@@ -110,6 +109,7 @@ func (m *ModelsInterface) EditImage(
 	payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, requested).
+		WithOperationSubtype(metering.SubtypeEdit).
 		WithAttributes(attrs).
 		Build()
 	metering.ApplyMetadata(payload, metadata)
@@ -139,6 +139,7 @@ func (m *ModelsInterface) UpscaleImage(
 		core.Debug("UpscaleImage error: %v", err)
 		payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 			WithTiming(requestTime, duration).
+			WithOperationSubtype(metering.SubtypeUpscale).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -148,8 +149,7 @@ func (m *ModelsInterface) UpscaleImage(
 
 	actual := len(resp.GeneratedImages)
 	attrs := map[string]interface{}{
-		"operationSubtype": "upscale",
-		"upscaleFactor":    upscaleFactor,
+		"upscaleFactor": upscaleFactor,
 	}
 	if upscaleFactor != "" {
 		attrs["resolution"] = mapUpscaleFactorToResolution(upscaleFactor)
@@ -160,6 +160,7 @@ func (m *ModelsInterface) UpscaleImage(
 	payload := metering.NewPayload(metering.OperationImage, model, m.provider.String()).
 		WithTiming(requestTime, duration).
 		WithImageBilling(actual, 1).
+		WithOperationSubtype(metering.SubtypeUpscale).
 		WithAttributes(attrs).
 		Build()
 	metering.ApplyMetadata(payload, metadata)

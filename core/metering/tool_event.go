@@ -18,6 +18,7 @@ type ToolEventPayload struct {
 	SubscriberCredential string                 `json:"subscriberCredential,omitempty"`
 	WorkflowID           string                 `json:"workflowId,omitempty"`
 	TraceID              string                 `json:"traceId,omitempty"`
+	AgenticJobID         string                 `json:"agenticJobId,omitempty"` // Direct assignment is unchecked; see sanitizeAgenticJobID.
 	UsageMetadata        map[string]interface{} `json:"usageMetadata,omitempty"`
 }
 
@@ -107,6 +108,15 @@ func (b *ToolEventBuilder) WithWorkflowID(wf string) *ToolEventBuilder {
 func (b *ToolEventBuilder) WithTraceID(trace string) *ToolEventBuilder {
 	if trace != "" {
 		b.payload.TraceID = trace
+	}
+	return b
+}
+
+// WithAgenticJobID sets the agentic job id, dropping it with a debug log when
+// the platform would reject it (see sanitizeAgenticJobID).
+func (b *ToolEventBuilder) WithAgenticJobID(id string) *ToolEventBuilder {
+	if id = sanitizeAgenticJobID(id, "ToolEventBuilder.WithAgenticJobID"); id != "" {
+		b.payload.AgenticJobID = id
 	}
 	return b
 }

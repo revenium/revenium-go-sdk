@@ -31,6 +31,7 @@ func (m *ModelsInterface) GenerateVideo(
 		core.Debug("GenerateVideo error: %v", err)
 		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
 			WithTiming(requestTime, time.Since(requestTime)).
+			WithOperationSubtype(metering.SubtypeGeneration).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -59,6 +60,7 @@ func (m *ModelsInterface) GenerateVideoFromSource(
 		core.Debug("GenerateVideoFromSource error: %v", err)
 		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
 			WithTiming(requestTime, time.Since(requestTime)).
+			WithOperationSubtype(metering.SubtypeGeneration).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -90,6 +92,7 @@ func (m *ModelsInterface) WaitForVideo(
 		core.Debug("WaitForVideo error: %v", err)
 		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
 			WithTiming(requestTime, duration).
+			WithOperationSubtype(operationSubtype).
 			WithError(err.Error()).
 			Build()
 		metering.ApplyMetadata(payload, metadata)
@@ -97,9 +100,7 @@ func (m *ModelsInterface) WaitForVideo(
 		return nil, err
 	}
 
-	attrs := map[string]interface{}{
-		"operationSubtype": operationSubtype,
-	}
+	attrs := map[string]interface{}{}
 
 	var requestedDuration float64
 	if config != nil {
@@ -119,6 +120,7 @@ func (m *ModelsInterface) WaitForVideo(
 	payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
 		WithTiming(requestTime, duration).
 		WithVideoDuration(0, requestedDuration).
+		WithOperationSubtype(operationSubtype).
 		WithAttributes(attrs).
 		Build()
 	metering.ApplyMetadata(payload, metadata)

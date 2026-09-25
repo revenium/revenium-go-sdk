@@ -12,6 +12,7 @@ var canonicalToolEventFields = []toolEventFieldMapping{
 	{"subscriberCredential", func(p *ToolEventPayload) *string { return &p.SubscriberCredential }},
 	{"workflowId", func(p *ToolEventPayload) *string { return &p.WorkflowID }},
 	{"traceId", func(p *ToolEventPayload) *string { return &p.TraceID }},
+	{"agenticJobId", func(p *ToolEventPayload) *string { return &p.AgenticJobID }},
 	{"transactionId", func(p *ToolEventPayload) *string { return &p.TransactionID }},
 	{"idempotencyKey", func(p *ToolEventPayload) *string { return &p.IdempotencyKey }},
 }
@@ -50,6 +51,13 @@ func applyToolEventStringField(payload *ToolEventPayload, metadata map[string]in
 		return
 	}
 	if s, ok := val.(string); ok && s != "" {
+		if f.key == "agenticJobId" {
+			// An id the platform would reject costs the whole tool event, so
+			// drop it rather than let the API answer 400.
+			if s = sanitizeAgenticJobID(s, "tool event metadata"); s == "" {
+				return
+			}
+		}
 		*f.accessor(payload) = s
 	}
 }

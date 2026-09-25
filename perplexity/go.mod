@@ -3,8 +3,8 @@ module github.com/revenium/revenium-go-sdk/perplexity
 go 1.22
 
 require (
-	github.com/openai/openai-go/v3 v3.8.0
-	github.com/revenium/revenium-go-sdk/core v1.1.4
+	github.com/openai/openai-go/v3 v3.44.0
+	github.com/revenium/revenium-go-sdk/core v1.1.7
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -21,3 +21,5 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/revenium/revenium-go-sdk/core => ../core

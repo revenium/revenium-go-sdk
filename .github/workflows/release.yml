@@ -27,15 +27,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
 
       - name: Run tests
-        run: |
-          MODULES=$(find . -name 'go.mod' -not -path './go.mod' -exec dirname {} \;)
-          for mod in $MODULES; do
-            echo "=== Testing $mod ==="
-            (cd "$mod" && go test -race ./...) || exit 1
-          done
+        run: make test-all
 
       - name: Extract changelog
         id: changelog

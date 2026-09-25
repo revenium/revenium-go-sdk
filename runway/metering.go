@@ -22,10 +22,11 @@ func mapRunwayStopReason(status TaskStatus, err *string) string {
 	}
 }
 
-func buildVideoMeteringPayload(result *VideoGenerationResult, metadata *UsageMetadata, capturePrompts bool, startTime time.Time) *metering.MeteringPayload {
+func buildVideoMeteringPayload(result *VideoGenerationResult, subtype string, metadata *UsageMetadata, capturePrompts bool, startTime time.Time) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationVideo, result.Model, "runway").
 		WithTiming(startTime, result.Duration).
 		WithModelSource("RUNWAY").
+		WithOperationSubtype(subtype).
 		WithTransactionID(result.ID).
 		WithStopReason(mapRunwayStopReason(result.Status, result.Error))
 

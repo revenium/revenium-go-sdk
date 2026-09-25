@@ -138,12 +138,12 @@ func TestApplyToolEventMetadata_StringFields(t *testing.T) {
 	p := NewToolEvent("tool").Build()
 	ApplyToolEventMetadata(p, map[string]interface{}{
 		"agent":                "my-agent",
-		"organizationName":    "org-123",
-		"productName":         "prod-456",
+		"organizationName":     "org-123",
+		"productName":          "prod-456",
 		"subscriberCredential": "sub-789",
-		"workflowId":          "wf-1",
-		"traceId":             "trace-1",
-		"transactionId":       "custom-tx",
+		"workflowId":           "wf-1",
+		"traceId":              "trace-1",
+		"transactionId":        "custom-tx",
 	})
 
 	assert.Equal(t, "my-agent", p.Agent)
@@ -249,4 +249,151 @@ func TestToolEventEndpoint(t *testing.T) {
 			assert.Equal(t, tt.expected, ToolEventEndpoint(tt.baseURL))
 		})
 	}
+}
+
+func TestToolEventPayload_AgenticJobWireFormat(t *testing.T) {
+	// ToolEventMetadataResource defines agenticJobId only — no name, type, or
+	// version. Those keys must never appear on a tool event.
+	unsupportedKeys := []string{"agenticJobName", "agenticJobType", "agenticJobVersion"}
+
+	tests := []struct {
+		name          string
+		set           func(*ToolEventPayload)
+		wantID        string
+		wantIDPresent bool
+	}{
+		{
+			name: "id set",
+			set: func(p *ToolEventPayload) {
+				p.AgenticJobID = "job-abc.123_x"
+			},
+			wantID:        "job-abc.123_x",
+			wantIDPresent: true,
+		},
+		{
+			name:          "id unset",
+			set:           func(p *ToolEventPayload) {},
+			wantIDPresent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewToolEvent("web_scraper").Build()
+			tt.set(p)
+
+			data, err := json.Marshal(p)
+			require.NoError(t, err)
+
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &m))
+
+			if tt.wantIDPresent {
+				assert.Equal(t, tt.wantID, m["agenticJobId"])
+			} else {
+				_, present := m["agenticJobId"]
+				assert.False(t, present, "unset agenticJobId must be absent from the body, not an empty string")
+			}
+
+			for _, key := range unsupportedKeys {
+				_, present := m[key]
+				assert.False(t, present, "%s is not part of ToolEventMetadataResource and must never be emitted", key)
+			}
+		})
+	}
+}
+
+func TestApplyToolEventMetadata_AgenticJobID(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]interface{}
+		want     string
+	}{
+		{
+			name:     "applied from metadata",
+			metadata: map[string]interface{}{"agenticJobId": "job-abc.123_x"},
+			want:     "job-abc.123_x",
+		},
+		{
+			name:     "absent key leaves it empty",
+			metadata: map[string]interface{}{"agent": "my-agent"},
+			want:     "",
+		},
+		{
+			name:     "empty string is ignored",
+			metadata: map[string]interface{}{"agenticJobId": ""},
+			want:     "",
+		},
+		{
+			name:     "non-string is ignored",
+			metadata: map[string]interface{}{"agenticJobId": 42},
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewToolEvent("web_scraper").Build()
+			ApplyToolEventMetadata(p, tt.metadata)
+			assert.Equal(t, tt.want, p.AgenticJobID)
+		})
+	}
+}
+
+func TestToolEventBuilder_WithAgenticJobID(t *testing.T) {
+	p := NewToolEvent("web_scraper").WithAgenticJobID("job-builder").Build()
+	assert.Equal(t, "job-builder", p.AgenticJobID)
+
+	// An empty id must not clobber a value already set.
+	p2 := NewToolEvent("web_scraper").WithAgenticJobID("job-keep").WithAgenticJobID("").Build()
+	assert.Equal(t, "job-keep", p2.AgenticJobID)
+}
+
+// The platform validates agenticJobId on tool events too, so a rejected id
+// costs the whole tool event. Drop it and keep the event.
+func TestApplyToolEventMetadata_AgenticJobIDValidation(t *testing.T) {
+	for _, tt := range agenticJobIDCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewToolEvent("web_scraper").Build()
+			ApplyToolEventMetadata(p, map[string]interface{}{
+				"agenticJobId": tt.id,
+				"agent":        "my-agent",
+				"traceId":      "trace-1",
+			})
+
+			if tt.valid {
+				assert.Equal(t, tt.id, p.AgenticJobID)
+			} else {
+				assert.Empty(t, p.AgenticJobID)
+			}
+
+			// Dropping the id must not cost the rest of the metadata.
+			assert.Equal(t, "my-agent", p.Agent)
+			assert.Equal(t, "trace-1", p.TraceID)
+		})
+	}
+}
+
+func TestToolEventBuilder_WithAgenticJobIDValidation(t *testing.T) {
+	for _, tt := range agenticJobIDCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewToolEvent("web_scraper").WithAgenticJobID(tt.id).Build()
+
+			if tt.valid {
+				assert.Equal(t, tt.id, p.AgenticJobID)
+			} else {
+				assert.Empty(t, p.AgenticJobID)
+			}
+		})
+	}
+}
+
+// A rejected id must not clobber an id already set on the builder.
+func TestToolEventBuilder_WithAgenticJobIDKeepsPreviousOnReject(t *testing.T) {
+	p := NewToolEvent("web_scraper").
+		WithAgenticJobID("job-keep").
+		WithAgenticJobID("conversion-funnel").
+		Build()
+
+	assert.Equal(t, "job-keep", p.AgenticJobID)
 }

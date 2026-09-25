@@ -162,7 +162,7 @@ func (r *ReveniumRunway) ImageToVideo(ctx context.Context, req *ImageToVideoRequ
 		result.FailureCode = statusResp.FailureCode
 	}
 
-	payload := buildVideoMeteringPayload(result, metadata, r.config.CapturePrompts, startTime)
+	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, metadata, r.config.CapturePrompts, startTime)
 	r.metering.Send(payload)
 
 	return result, nil
@@ -214,7 +214,7 @@ func (r *ReveniumRunway) VideoToVideo(ctx context.Context, req *VideoToVideoRequ
 		result.FailureCode = statusResp.FailureCode
 	}
 
-	payload := buildVideoMeteringPayload(result, metadata, r.config.CapturePrompts, startTime)
+	payload := buildVideoMeteringPayload(result, metering.SubtypeEdit, metadata, r.config.CapturePrompts, startTime)
 	r.metering.Send(payload)
 
 	return result, nil
@@ -255,7 +255,7 @@ func (r *ReveniumRunway) UpscaleVideo(ctx context.Context, req *VideoUpscaleRequ
 		result.FailureCode = statusResp.FailureCode
 	}
 
-	payload := buildVideoMeteringPayload(result, metadata, r.config.CapturePrompts, startTime)
+	payload := buildVideoMeteringPayload(result, metering.SubtypeUpscale, metadata, r.config.CapturePrompts, startTime)
 	r.metering.Send(payload)
 
 	return result, nil

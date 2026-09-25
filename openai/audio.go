@@ -61,7 +61,7 @@ func (t *TranscriptionsInterface) Create(ctx context.Context, params openai.Audi
 	resp, err := t.client.Audio.Transcriptions.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTranscription, metadata, duration, providerStr, requestTime, err.Error())
 		t.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -69,14 +69,14 @@ func (t *TranscriptionsInterface) Create(ctx context.Context, params openai.Audi
 	duration := time.Since(requestTime)
 
 	attrs := map[string]interface{}{
-		"billing_unit":     "per_minute",
-		"operationSubtype": "transcription",
-		"language":         resp.Language,
-		"response_format":  string(params.ResponseFormat),
+		"billing_unit":    "per_minute",
+		"language":        resp.Language,
+		"response_format": string(params.ResponseFormat),
 	}
 
 	builder := metering.NewPayload(metering.OperationAudio, model, providerStr).
 		WithTiming(requestTime, duration).
+		WithOperationSubtype(metering.SubtypeTranscription).
 		WithAttributes(attrs)
 
 	if resp.Duration > 0 {
@@ -106,7 +106,7 @@ func (t *TranslationsInterface) Create(ctx context.Context, params openai.AudioT
 	resp, err := t.client.Audio.Translations.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTranslation, metadata, duration, providerStr, requestTime, err.Error())
 		t.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -114,14 +114,14 @@ func (t *TranslationsInterface) Create(ctx context.Context, params openai.AudioT
 	duration := time.Since(requestTime)
 
 	attrs := map[string]interface{}{
-		"billing_unit":     "per_minute",
-		"operationSubtype": "translation",
-		"target_language":  "en",
-		"response_format":  string(params.ResponseFormat),
+		"billing_unit":    "per_minute",
+		"target_language": "en",
+		"response_format": string(params.ResponseFormat),
 	}
 
 	payload := metering.NewPayload(metering.OperationAudio, model, providerStr).
 		WithTiming(requestTime, duration).
+		WithOperationSubtype(metering.SubtypeTranslation).
 		WithAttributes(attrs).
 		Build()
 
@@ -147,7 +147,7 @@ func (s *SpeechInterface) Create(ctx context.Context, params openai.AudioSpeechN
 	resp, err := s.client.Audio.Speech.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTTS, metadata, duration, providerStr, requestTime, err.Error())
 		s.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -160,16 +160,16 @@ func (s *SpeechInterface) Create(ctx context.Context, params openai.AudioSpeechN
 	}
 
 	attrs := map[string]interface{}{
-		"billing_unit":             "per_character",
-		"operationSubtype":        "speech_synthesis",
+		"billing_unit":              "per_character",
 		"requested_character_count": utf8.RuneCountInString(params.Input),
-		"voice":                    string(params.Voice),
-		"speed":                    speed,
-		"response_format":          string(params.ResponseFormat),
+		"voice":                     audioVoiceLabel(params.Voice),
+		"speed":                     speed,
+		"response_format":           string(params.ResponseFormat),
 	}
 
 	payload := metering.NewPayload(metering.OperationAudio, model, providerStr).
 		WithTiming(requestTime, duration).
+		WithOperationSubtype(metering.SubtypeTTS).
 		WithAttributes(attrs).
 		Build()
 
@@ -179,9 +179,20 @@ func (s *SpeechInterface) Create(ctx context.Context, params openai.AudioSpeechN
 	return resp, nil
 }
 
-func buildAudioErrorPayload(model string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
+func audioVoiceLabel(voice openai.AudioSpeechNewParamsVoiceUnion) string {
+	if voice.OfAudioSpeechNewsVoiceID != nil {
+		return voice.OfAudioSpeechNewsVoiceID.ID
+	}
+	if voice.OfAudioSpeechNewsVoiceString2.Valid() {
+		return voice.OfAudioSpeechNewsVoiceString2.Value
+	}
+	return voice.OfString.Value
+}
+
+func buildAudioErrorPayload(model, subtype string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
 	payload := metering.NewPayload(metering.OperationAudio, model, provider).
 		WithTiming(requestTime, duration).
+		WithOperationSubtype(subtype).
 		WithError(errorReason).
 		Build()
 

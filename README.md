@@ -625,9 +625,18 @@ Attached via `core.WithUsageMetadata(ctx, map[string]interface{}{...})` or via `
 | `productName`           | string    | Product or feature name                                |
 | `subscriptionId`        | string    | Subscription plan identifier                           |
 | `responseQualityScore`  | float64   | Custom quality rating (0.0–1.0)                        |
+| `operationSubtype`      | string    | Overrides the detected image/audio/video subtype       |
 | `subscriber.id`         | string    | Unique user identifier                                 |
 | `subscriber.email`      | string    | User email address                                     |
 | `subscriber.credential` | object    | Authentication credential (`name` and `value`)         |
+
+Accepted `operationSubtype` values, by operation type. Any other value is logged as a warning and ignored, and the detected subtype is sent instead. Chat and embedding payloads never carry a subtype:
+
+| Operation type | Accepted values                                                          |
+| -------------- | ------------------------------------------------------------------------ |
+| IMAGE          | `generation`, `edit`, `variation`, `upscale`, `inpainting`               |
+| AUDIO          | `transcription`, `translation`, `synthesis`, `speech`, `tts`, `realtime` |
+| VIDEO          | `generation`, `upscale`, `extend`, `edit`                                |
 
 ## Trace Visualization Fields
 

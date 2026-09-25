@@ -10,7 +10,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0
 	github.com/openai/openai-go/v3 v3.46.0
 	github.com/revenium/revenium-go-sdk/anthropic v1.1.4
-	github.com/revenium/revenium-go-sdk/core v1.1.4
+	github.com/revenium/revenium-go-sdk/core v1.1.7
 	github.com/revenium/revenium-go-sdk/fal v1.1.4
 	github.com/revenium/revenium-go-sdk/google v1.1.4
 	github.com/revenium/revenium-go-sdk/litellm v1.1.4

@@ -10,6 +10,7 @@ type MeteringPayload struct {
 	CostType                string `json:"costType"`
 	IsStreamed              bool   `json:"isStreamed"`
 	OperationType           string `json:"operationType"`
+	OperationSubtype        string `json:"operationSubtype,omitempty"`
 	InputTokenCount         int64  `json:"inputTokenCount"`
 	OutputTokenCount        int64  `json:"outputTokenCount"`
 	ReasoningTokenCount     int64  `json:"reasoningTokenCount"`
@@ -51,6 +52,10 @@ type MeteringPayload struct {
 	TraceType            string                 `json:"traceType,omitempty"`
 	TraceName            string                 `json:"traceName,omitempty"`
 	TicketID             string                 `json:"ticketId,omitempty"`
+	AgenticJobID         string                 `json:"agenticJobId,omitempty"` // Direct assignment is unchecked; see sanitizeAgenticJobID.
+	AgenticJobName       string                 `json:"agenticJobName,omitempty"`
+	AgenticJobType       string                 `json:"agenticJobType,omitempty"`
+	AgenticJobVersion    string                 `json:"agenticJobVersion,omitempty"`
 	Environment          string                 `json:"environment,omitempty"`
 	Region               string                 `json:"region,omitempty"`
 	RetryNumber          *int                   `json:"retryNumber,omitempty"`
@@ -163,6 +168,11 @@ func (b *PayloadBuilder) WithVideoDuration(actual, requested float64) *PayloadBu
 
 func (b *PayloadBuilder) WithAudioDuration(duration float64) *PayloadBuilder {
 	b.payload.DurationSeconds = &duration
+	return b
+}
+
+func (b *PayloadBuilder) WithOperationSubtype(subtype string) *PayloadBuilder {
+	applyOperationSubtype(b.payload, subtype)
 	return b
 }
 
