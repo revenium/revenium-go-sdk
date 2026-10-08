@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-10-08
+
+### Fixed
+
+- **LiteLLM**: proxied calls were metered with `cacheCreationTokenCount` 0, and cache counts carried on
+  usage chunks whose prompt and completion counts were 0 were dropped on the streaming path; both
+  Anthropic-native (`cache_creation_input_tokens`, `cache_read_input_tokens`) and OpenAI-shaped
+  (`prompt_tokens_details.cached_tokens`) fields are now read (BACK-3590)
+- **Anthropic on Bedrock**: the default `CreateMessage` path (InvokeModel) read only `input_tokens` and
+  `output_tokens`, so cache creation and cache read tokens were never metered; `CreateMessageConverse`
+  already reported them. The non-streaming InvokeModel path now extracts both. Streaming Bedrock usage
+  is still not captured and is tracked as BACK-2418 (BACK-2417)
+- **Anthropic**: extended-thinking output was metered with `reasoningTokenCount` 0 on every call; the
+  `output_tokens_details.thinking_tokens` field shipped in `anthropic-sdk-go` v1.76 is now forwarded
+  for non-streaming and streaming payloads (FRONT-2939). Bedrock does not expose thinking tokens, so Bedrock payloads still report 0
+- **Google**: `TOO_MANY_TOOL_CALLS` and `LANGUAGE` finish reasons fell through to the default with a
+  warning; they now map to `COMPLETION_LIMIT` and `ERROR`
+
+### Changed
+
+- **All providers**: tool-call stop reasons (`tool_use`, `tool_calls`, `function_call`) were metered
+  as `END`, which disagreed with the Node and Python SDKs; they now map to `END_SEQUENCE` across
+  Anthropic (including Bedrock InvokeModel and Converse), OpenAI (Chat Completions and Responses),
+  Perplexity, LiteLLM, Grok, Groq and Ollama (FRONT-2960).
+  **Impact**: saved filters, alerts and dashboards that match `stopReason = END` stop matching
+  tool-call turns from this version onwards. The match is exact, so nothing errors — affected reports
+  simply return fewer rows and must be widened to `END` or `END_SEQUENCE`. History is not
+  backfilled, so any `stopReason` time series shows a step change at the upgrade date
+- Provider modules track the current upstream SDKs: `anthropic-sdk-go` v1.76.0, `openai-go/v3`
+  v3.66.0, `google.golang.org/genai` v1.71.0. `openai-go/v3` requires Go 1.25, so the `openai` and
+  `perplexity` modules now declare `go 1.25`; `anthropic` and `google` move from `go 1.23` to
+  `go 1.24` with their upstreams. Consumers on an older toolchain must upgrade before taking
+  this release; CI tests on Go 1.25 and 1.26
+- `scripts/provider-surface-check` compares the usage structs and stop-reason constants this SDK
+  reads against the latest published upstream modules and fails when a consumed field disappears or
+  a stop reason is unmapped; a weekly workflow runs it with the test suite against the latest versions
+
 ## [1.1.7] - 2026-09-25
 
 ### Added
@@ -201,6 +238,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-module layout** so consumers pull only the providers they need
 - **CI/CD pipeline** with GitHub Actions for automated testing across all modules
 
+[1.1.8]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.8
 [1.1.7]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.7
 [1.1.6]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.6
 [1.1.4]: https://github.com/revenium/revenium-go-sdk/releases/tag/v1.1.4

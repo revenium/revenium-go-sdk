@@ -2,14 +2,15 @@ package anthropic
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	smithymiddleware "github.com/aws/smithy-go/middleware"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithymiddleware "github.com/aws/smithy-go/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,10 +95,10 @@ type mockBedrockClient struct {
 	invokeStreamCalls   int
 	converseStreamCalls int
 
-	invokeModelResp    *bedrockruntime.InvokeModelOutput
-	converseResp       *bedrockruntime.ConverseOutput
-	invokeModelErr     error
-	converseErr        error
+	invokeModelResp *bedrockruntime.InvokeModelOutput
+	converseResp    *bedrockruntime.ConverseOutput
+	invokeModelErr  error
+	converseErr     error
 }
 
 func (m *mockBedrockClient) InvokeModel(_ context.Context, _ *bedrockruntime.InvokeModelInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelOutput, error) {
@@ -139,9 +140,9 @@ func TestCreateMessageConverse(t *testing.T) {
 			},
 			StopReason: brtypes.StopReasonEndTurn,
 			Usage: &brtypes.TokenUsage{
-				InputTokens:       aws.Int32(10),
-				OutputTokens:      aws.Int32(5),
-				TotalTokens:       aws.Int32(15),
+				InputTokens:           aws.Int32(10),
+				OutputTokens:          aws.Int32(5),
+				TotalTokens:           aws.Int32(15),
 				CacheReadInputTokens:  aws.Int32(3),
 				CacheWriteInputTokens: aws.Int32(2),
 			},
@@ -203,6 +204,69 @@ func TestCreateMessage_DefaultUsesInvokeModel(t *testing.T) {
 	assert.Equal(t, 0, mock.converseCalls)
 }
 
+// BACK-2417: the InvokeModel API passes through Anthropic's native response
+// format, so cache token counts are reported as cache_creation_input_tokens /
+// cache_read_input_tokens - the same JSON keys as the native Anthropic API,
+// not Converse's CacheReadInputTokens/CacheWriteInputTokens. This must survive
+// through TransformResponseFromBedrockFormat the same way it already does for
+// the Converse path (see TestCreateMessageConverse above).
+func TestCreateMessage_InvokeModelExtractsCacheTokens(t *testing.T) {
+	mock := &mockBedrockClient{
+		invokeModelResp: &bedrockruntime.InvokeModelOutput{
+			Body: []byte(`{"id":"msg-1","model":"claude-3-5-sonnet","content":[{"type":"text","text":"Hello"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":25,"cache_read_input_tokens":75}}`),
+		},
+	}
+
+	adapter := &BedrockAdapter{config: &Config{}, client: mock}
+	resp, err := adapter.CreateMessage(context.Background(), makeTestParams("claude-3-5-sonnet", "Hello"))
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), resp.Usage.InputTokens)
+	assert.Equal(t, int64(50), resp.Usage.OutputTokens)
+	assert.Equal(t, int64(25), resp.Usage.CacheCreationInputTokens)
+	assert.Equal(t, int64(75), resp.Usage.CacheReadInputTokens)
+}
+
+func TestTransformResponseFromBedrockFormat_CacheTokensSurvive(t *testing.T) {
+	ba := &BedrockAdapter{}
+	bedrockResp := map[string]interface{}{
+		"id":    "msg_123",
+		"model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		"usage": map[string]interface{}{
+			"input_tokens":                100.0,
+			"output_tokens":               50.0,
+			"cache_creation_input_tokens": 25.0,
+			"cache_read_input_tokens":     75.0,
+		},
+	}
+
+	msg := ba.TransformResponseFromBedrockFormat(bedrockResp)
+
+	require.NotNil(t, msg)
+	assert.Equal(t, int64(100), msg.Usage.InputTokens)
+	assert.Equal(t, int64(50), msg.Usage.OutputTokens)
+	assert.Equal(t, int64(25), msg.Usage.CacheCreationInputTokens)
+	assert.Equal(t, int64(75), msg.Usage.CacheReadInputTokens)
+}
+
+func TestTransformResponseFromBedrockFormat_ZeroCacheTokensWhenAbsent(t *testing.T) {
+	ba := &BedrockAdapter{}
+	bedrockResp := map[string]interface{}{
+		"id":    "msg_124",
+		"model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		"usage": map[string]interface{}{
+			"input_tokens":  10.0,
+			"output_tokens": 5.0,
+		},
+	}
+
+	msg := ba.TransformResponseFromBedrockFormat(bedrockResp)
+
+	require.NotNil(t, msg)
+	assert.Equal(t, int64(0), msg.Usage.CacheCreationInputTokens)
+	assert.Equal(t, int64(0), msg.Usage.CacheReadInputTokens)
+}
+
 func TestDetectProvider_Bedrock_AWSCredentials(t *testing.T) {
 	cfg := &Config{AWSAccessKeyID: "key", AWSSecretAccessKey: "secret"}
 	assert.Equal(t, ProviderBedrock, DetectProvider(cfg))
@@ -243,6 +307,17 @@ func TestConvertConverseStopReason(t *testing.T) {
 	assert.Equal(t, "content_filtered", convertConverseStopReason(brtypes.StopReasonContentFiltered))
 	assert.Equal(t, "guardrail_intervened", convertConverseStopReason(brtypes.StopReasonGuardrailIntervened))
 	assert.Equal(t, "future_reason", convertConverseStopReason("future_reason"))
+}
+
+func TestTransformResponseFromBedrockFormat_PreservesStopReason(t *testing.T) {
+	adapter := &BedrockAdapter{}
+	for _, reason := range []string{"tool_use", "refusal", "end_turn", "future_reason"} {
+		t.Run(reason, func(t *testing.T) {
+			msg := adapter.TransformResponseFromBedrockFormat(map[string]interface{}{"stop_reason": reason})
+			require.NotNil(t, msg)
+			assert.Equal(t, reason, string(msg.StopReason))
+		})
+	}
 }
 
 func TestBedrockStreamingWrapper_AccumulatesTokens(t *testing.T) {
@@ -374,5 +449,18 @@ func makeTestParams(model, text string) anthropicsdk.MessageNewParams {
 				},
 			},
 		},
+	}
+}
+
+func TestBedrockReflectionFieldNamesExist(t *testing.T) {
+	messageType := reflect.TypeOf(anthropicsdk.Message{})
+	for _, name := range []string{"Model", "Content", "StopReason", "Usage"} {
+		_, ok := messageType.FieldByName(name)
+		assert.True(t, ok, "anthropic.Message no longer has field %s used by bedrock.go", name)
+	}
+	usageType := reflect.TypeOf(anthropicsdk.Usage{})
+	for _, name := range []string{"InputTokens", "OutputTokens", "CacheReadInputTokens", "CacheCreationInputTokens"} {
+		_, ok := usageType.FieldByName(name)
+		assert.True(t, ok, "anthropic.Usage no longer has field %s used by bedrock.go", name)
 	}
 }

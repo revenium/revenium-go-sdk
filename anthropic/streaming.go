@@ -28,6 +28,7 @@ type StreamingWrapper struct {
 	totalTokens          int
 	cacheCreationTokens  int
 	cacheReadTokens      int
+	reasoningTokens      int
 	model                string
 	provider             string
 	stopReason           string
@@ -141,6 +142,9 @@ func (sw *StreamingWrapper) processTypedEvent(event anthropic.MessageStreamEvent
 			sw.cacheReadTokens = int(event.Usage.CacheReadInputTokens)
 		}
 		sw.totalTokens = sw.inputTokens + sw.outputTokens
+		if event.Usage.OutputTokensDetails.ThinkingTokens > 0 {
+			sw.reasoningTokens = int(event.Usage.OutputTokensDetails.ThinkingTokens)
+		}
 		if event.Delta.StopReason != "" {
 			sw.stopReason = string(event.Delta.StopReason)
 		}
@@ -176,6 +180,9 @@ func (sw *StreamingWrapper) processReflectEvent(event interface{}) {
 			}
 			if usage.CacheReadInputTokens > 0 {
 				sw.cacheReadTokens = int(usage.CacheReadInputTokens)
+			}
+			if usage.OutputTokensDetails.ThinkingTokens > 0 {
+				sw.reasoningTokens = int(usage.OutputTokensDetails.ThinkingTokens)
 			}
 		}
 
@@ -288,7 +295,7 @@ func (sw *StreamingWrapper) Close() error {
 	payload := metering.NewPayload(metering.OperationChat, sw.model, normalizedProvider).
 		WithTiming(sw.startTime, duration).
 		WithTokens(int64(sw.inputTokens), int64(sw.outputTokens), int64(sw.totalTokens)).
-		WithReasoningTokens(0, int64(sw.cacheCreationTokens), int64(sw.cacheReadTokens)).
+		WithReasoningTokens(int64(sw.reasoningTokens), int64(sw.cacheCreationTokens), int64(sw.cacheReadTokens)).
 		WithStreaming(true, timeToFirstToken, completionStartTime).
 		WithStopReason(stopReason).
 		Build()

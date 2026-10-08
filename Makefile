@@ -31,6 +31,9 @@ deps: ## Download dependencies for all modules
 build-all: ## Build all modules
 	$(call for_each_module,Building,go build ./...)
 
+surface-check: ## Compare consumed provider usage fields and stop reasons against the latest upstream modules
+	@cd scripts/provider-surface-check && go run . $(ARGS)
+
 clean: ## Clean build artifacts
 	@find . -name '*.test' -delete
 	@find . -name '*.out' -delete

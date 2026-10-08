@@ -29,9 +29,9 @@ var (
 )
 
 type AnthropicStatus struct {
-	Initialized        bool
-	HasConfig          bool
-	Provider           string
+	Initialized         bool
+	HasConfig           bool
+	Provider            string
 	CircuitBreakerState string
 }
 
@@ -236,7 +236,7 @@ func (m *MessagesInterface) buildAnthropicPayload(resp *anthropic.Message, md ma
 	payload := metering.NewPayload(metering.OperationChat, string(resp.Model), normalizedProvider).
 		WithTiming(startTime, duration).
 		WithTokens(resp.Usage.InputTokens, resp.Usage.OutputTokens, totalTokens).
-		WithReasoningTokens(0, resp.Usage.CacheCreationInputTokens, resp.Usage.CacheReadInputTokens).
+		WithReasoningTokens(resp.Usage.OutputTokensDetails.ThinkingTokens, resp.Usage.CacheCreationInputTokens, resp.Usage.CacheReadInputTokens).
 		WithStopReason(stopReason).
 		Build()
 

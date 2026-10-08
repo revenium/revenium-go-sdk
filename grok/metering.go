@@ -38,13 +38,13 @@ func containsImageReference(content string) bool {
 }
 
 func mapStopReasonToRevenium(stopReason string) string {
-	switch stopReason {
+	switch strings.ToLower(stopReason) {
 	case "stop":
 		return "END"
 	case "length":
 		return "TOKEN_LIMIT"
 	case "tool_calls", "function_call":
-		return "END"
+		return "END_SEQUENCE"
 	case "content_filter":
 		return "ERROR"
 	case "null":

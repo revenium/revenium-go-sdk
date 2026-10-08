@@ -33,7 +33,7 @@ func MapOpenAIFinishReason(finishReason string, defaultReason core.ReveniumStopR
 	case "CONTENT_FILTER":
 		return core.StopReasonError
 	case "TOOL_CALLS", "FUNCTION_CALL":
-		return core.StopReasonEnd
+		return core.StopReasonEndSequence
 	default:
 		core.Warn("Unknown finishReason: %q. Using fallback: %q. Please report this to support@revenium.io if this is a new OpenAI value.", finishReason, defaultReason)
 		return defaultReason

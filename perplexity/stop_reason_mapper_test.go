@@ -50,28 +50,28 @@ func TestMapOpenAIFinishReason(t *testing.T) {
 		},
 		// Tool/function calls
 		{
-			name:           "tool_calls maps to END",
+			name:           "tool_calls maps to END_SEQUENCE",
 			finishReason:   "tool_calls",
 			defaultReason:  StopReasonEnd,
-			expectedReason: StopReasonEnd,
+			expectedReason: StopReasonEndSequence,
 		},
 		{
-			name:           "TOOL_CALLS (uppercase) maps to END",
+			name:           "TOOL_CALLS (uppercase) maps to END_SEQUENCE",
 			finishReason:   "TOOL_CALLS",
 			defaultReason:  StopReasonEnd,
-			expectedReason: StopReasonEnd,
+			expectedReason: StopReasonEndSequence,
 		},
 		{
-			name:           "function_call maps to END",
+			name:           "function_call maps to END_SEQUENCE",
 			finishReason:   "function_call",
 			defaultReason:  StopReasonEnd,
-			expectedReason: StopReasonEnd,
+			expectedReason: StopReasonEndSequence,
 		},
 		{
-			name:           "FUNCTION_CALL (uppercase) maps to END",
+			name:           "FUNCTION_CALL (uppercase) maps to END_SEQUENCE",
 			finishReason:   "FUNCTION_CALL",
 			defaultReason:  StopReasonEnd,
-			expectedReason: StopReasonEnd,
+			expectedReason: StopReasonEndSequence,
 		},
 		// Empty finish reason
 		{
@@ -130,4 +130,3 @@ func TestMapOpenAIFinishReason(t *testing.T) {
 		})
 	}
 }
-
