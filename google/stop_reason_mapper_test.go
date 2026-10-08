@@ -28,7 +28,19 @@ func TestMapGoogleFinishReason(t *testing.T) {
 			defaultReason:  core.StopReasonEnd,
 			expectedReason: core.StopReasonTokenLimit,
 		},
+		{
+			name:           "TOO_MANY_TOOL_CALLS maps to COMPLETION_LIMIT",
+			finishReason:   "TOO_MANY_TOOL_CALLS",
+			defaultReason:  core.StopReasonEnd,
+			expectedReason: core.StopReasonCompletionLimit,
+		},
 		// Safety and content filtering
+		{
+			name:           "LANGUAGE maps to ERROR",
+			finishReason:   "LANGUAGE",
+			defaultReason:  core.StopReasonEnd,
+			expectedReason: core.StopReasonError,
+		},
 		{
 			name:           "SAFETY maps to ERROR",
 			finishReason:   "SAFETY",

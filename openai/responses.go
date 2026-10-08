@@ -33,7 +33,7 @@ func (r *ResponsesInterface) Create(ctx context.Context, params responses.Respon
 	}
 
 	duration := time.Since(requestTime)
-	payload := r.buildResponsePayload(resp, metadata, duration, providerStr, requestTime, false)
+	payload := r.buildResponsePayload(resp, metadata, duration, providerStr, requestTime, nil)
 	r.parent.metering.Send(payload)
 
 	return resp, nil
@@ -65,19 +65,31 @@ func (r *ResponsesInterface) CreateStreaming(ctx context.Context, params respons
 	}, nil
 }
 
-func (r *ResponsesInterface) buildResponsePayload(resp *responses.Response, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, isStreamed bool) *metering.MeteringPayload {
+type streamTiming struct {
+	timeToFirstToken    int64
+	completionStartTime *time.Time
+}
+
+func (r *ResponsesInterface) buildResponsePayload(resp *responses.Response, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, stream *streamTiming) *metering.MeteringPayload {
 	inputTokens := resp.Usage.InputTokens
 	outputTokens := resp.Usage.OutputTokens
 	totalTokens := resp.Usage.TotalTokens
 	reasoningTokens := resp.Usage.OutputTokensDetails.ReasoningTokens
 	cachedTokens := resp.Usage.InputTokensDetails.CachedTokens
 
+	timeToFirstToken := int64(0)
+	var completionStartTime *time.Time
+	if stream != nil {
+		timeToFirstToken = stream.timeToFirstToken
+		completionStartTime = stream.completionStartTime
+	}
+
 	payload := metering.NewPayload(metering.OperationChat, string(resp.Model), provider).
 		WithTiming(requestTime, duration).
 		WithTokens(inputTokens, outputTokens, totalTokens).
 		WithReasoningTokens(reasoningTokens, 0, cachedTokens).
-		WithStreaming(isStreamed, 0, nil).
-		WithStopReason(mapResponseStatus(string(resp.Status))).
+		WithStreaming(stream != nil, timeToFirstToken, completionStartTime).
+		WithStopReason(mapResponseStopReason(resp)).
 		Build()
 
 	metering.ApplyMetadata(payload, md)
@@ -115,7 +127,11 @@ func (sw *ResponsesStreamingWrapper) Next() bool {
 
 func (sw *ResponsesStreamingWrapper) Current() responses.ResponseStreamEventUnion {
 	event := sw.stream.Current()
+	sw.captureEvent(event)
+	return event
+}
 
+func (sw *ResponsesStreamingWrapper) captureEvent(event responses.ResponseStreamEventUnion) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -128,8 +144,6 @@ func (sw *ResponsesStreamingWrapper) Current() responses.ResponseStreamEventUnio
 		resp := event.Response
 		sw.finalResponse = &resp
 	}
-
-	return event
 }
 
 func (sw *ResponsesStreamingWrapper) Err() error {
@@ -158,16 +172,8 @@ func (sw *ResponsesStreamingWrapper) Close() error {
 	}
 
 	if sw.finalResponse != nil {
-		resp := sw.finalResponse
-		payload := metering.NewPayload(metering.OperationChat, string(resp.Model), sw.provider).
-			WithTiming(sw.startTime, duration).
-			WithTokens(resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.TotalTokens).
-			WithReasoningTokens(resp.Usage.OutputTokensDetails.ReasoningTokens, 0, resp.Usage.InputTokensDetails.CachedTokens).
-			WithStreaming(true, timeToFirstToken, completionStartTime).
-			WithStopReason(mapResponseStatus(string(resp.Status))).
-			Build()
-
-		metering.ApplyMetadata(payload, sw.metadata)
+		timing := &streamTiming{timeToFirstToken: timeToFirstToken, completionStartTime: completionStartTime}
+		payload := sw.iface.buildResponsePayload(sw.finalResponse, sw.metadata, duration, sw.provider, sw.startTime, timing)
 		sw.parent.metering.Send(payload)
 	} else {
 		payload := metering.NewPayload(metering.OperationChat, sw.model, sw.provider).
@@ -180,6 +186,22 @@ func (sw *ResponsesStreamingWrapper) Close() error {
 	}
 
 	return err
+}
+
+func mapResponseStopReason(resp *responses.Response) string {
+	if resp.Status == "completed" && hasToolCallOutput(resp.Output) {
+		return "END_SEQUENCE"
+	}
+	return mapResponseStatus(string(resp.Status))
+}
+
+func hasToolCallOutput(output []responses.ResponseOutputItemUnion) bool {
+	for _, item := range output {
+		if item.Type == "function_call" || item.Type == "custom_tool_call" {
+			return true
+		}
+	}
+	return false
 }
 
 func mapResponseStatus(status string) string {

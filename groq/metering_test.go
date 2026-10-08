@@ -10,8 +10,10 @@ func TestMapStopReasonToRevenium(t *testing.T) {
 	cases := map[string]string{
 		"stop":           "END",
 		"length":         "TOKEN_LIMIT",
-		"tool_calls":     "END",
-		"function_call":  "END",
+		"tool_calls":     "END_SEQUENCE",
+		"TOOL_CALLS":     "END_SEQUENCE",
+		"function_call":  "END_SEQUENCE",
+		"FUNCTION_CALL":  "END_SEQUENCE",
 		"content_filter": "ERROR",
 		"null":           "END",
 		"":               "END",

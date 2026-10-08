@@ -588,13 +588,15 @@ func (ba *BedrockAdapter) TransformResponseFromBedrockFormat(bedrockResp map[str
 
 	// Extract stop reason
 	if stopReason, ok := bedrockResp["stop_reason"].(string); ok {
-		reflect.ValueOf(msg).Elem().FieldByName("StopReason").SetString(convertBedrockStopReason(stopReason))
+		reflect.ValueOf(msg).Elem().FieldByName("StopReason").SetString(stopReason)
 	}
 
 	// Extract usage information
 	if usage, ok := bedrockResp["usage"].(map[string]interface{}); ok {
 		inputTokens := int64(0)
 		outputTokens := int64(0)
+		cacheCreationTokens := int64(0)
+		cacheReadTokens := int64(0)
 
 		if it, ok := usage["input_tokens"].(float64); ok {
 			inputTokens = int64(it)
@@ -602,31 +604,29 @@ func (ba *BedrockAdapter) TransformResponseFromBedrockFormat(bedrockResp map[str
 		if ot, ok := usage["output_tokens"].(float64); ok {
 			outputTokens = int64(ot)
 		}
+		// Bedrock's InvokeModel API passes through Anthropic's native response
+		// format, so cache token counts use the same JSON keys as the native API
+		// (unlike the Converse API above, which uses its own field names -
+		// CacheReadInputTokens / CacheWriteInputTokens on brtypes.TokenUsage)
+		if cct, ok := usage["cache_creation_input_tokens"].(float64); ok {
+			cacheCreationTokens = int64(cct)
+		}
+		if crt, ok := usage["cache_read_input_tokens"].(float64); ok {
+			cacheReadTokens = int64(crt)
+		}
 
 		// Set usage fields via reflection
 		usageField := reflect.ValueOf(msg).Elem().FieldByName("Usage")
 		if usageField.IsValid() && usageField.CanSet() {
 			usageField.FieldByName("InputTokens").SetInt(inputTokens)
 			usageField.FieldByName("OutputTokens").SetInt(outputTokens)
+			usageField.FieldByName("CacheCreationInputTokens").SetInt(cacheCreationTokens)
+			usageField.FieldByName("CacheReadInputTokens").SetInt(cacheReadTokens)
 		}
 	}
 
 	core.Debug("Transformed Bedrock response to Anthropic format")
 	return msg
-}
-
-// convertBedrockStopReason converts Bedrock stop reason to Anthropic format
-func convertBedrockStopReason(bedrockReason string) string {
-	switch bedrockReason {
-	case "end_turn":
-		return "end_turn"
-	case "max_tokens":
-		return "max_tokens"
-	case "stop_sequence":
-		return "stop_sequence"
-	default:
-		return "end_turn"
-	}
 }
 
 // FallbackToAnthropic falls back to Anthropic native API on Bedrock error
@@ -882,4 +882,3 @@ func (csw *ConverseStreamingWrapper) Close() error {
 	}
 	return nil
 }
-

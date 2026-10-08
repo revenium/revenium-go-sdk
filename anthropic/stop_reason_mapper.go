@@ -1,9 +1,13 @@
 package anthropic
 
-import "github.com/revenium/revenium-go-sdk/core"
+import (
+	"strings"
+
+	"github.com/revenium/revenium-go-sdk/core"
+)
 
 func MapStopReasonToRevenium(stopReason string) string {
-	switch stopReason {
+	switch strings.ToLower(stopReason) {
 	case "end_turn":
 		return "END"
 	case "max_tokens", "model_context_window_exceeded":
@@ -11,7 +15,7 @@ func MapStopReasonToRevenium(stopReason string) string {
 	case "stop_sequence":
 		return "END_SEQUENCE"
 	case "tool_use":
-		return "END"
+		return "END_SEQUENCE"
 	case "pause_turn":
 		return "END"
 	case "refusal":

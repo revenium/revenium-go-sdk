@@ -234,15 +234,20 @@ func (s *StreamingResponse) processChunkData(chunk *StreamChunk) {
 	if usage == nil && chunk.XGroq != nil && chunk.XGroq.Usage != nil {
 		usage = chunk.XGroq.Usage
 	}
-	if usage != nil && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
-		s.inputTokens = usage.PromptTokens
-		s.outputTokens = usage.CompletionTokens
-		s.totalTokens = usage.TotalTokens
-		if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
-			s.reasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
+	if usage != nil {
+		if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+			s.inputTokens = usage.PromptTokens
+			s.outputTokens = usage.CompletionTokens
+			s.totalTokens = usage.TotalTokens
+			if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
+				s.reasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
+			}
 		}
 		if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
 			s.cacheReadTokens = usage.PromptTokensDetails.CachedTokens
+		}
+		if cacheCreationTokens := usage.CacheCreationTokenCount(); cacheCreationTokens > 0 {
+			s.cacheCreationTokens = cacheCreationTokens
 		}
 	}
 

@@ -87,16 +87,35 @@ type ResponseMessage struct {
 
 // TokenUsage represents token usage information
 type TokenUsage struct {
-	PromptTokens            int64                    `json:"prompt_tokens"`
-	CompletionTokens        int64                    `json:"completion_tokens"`
-	TotalTokens             int64                    `json:"total_tokens"`
-	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
-	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokens             int64                    `json:"prompt_tokens"`
+	CompletionTokens         int64                    `json:"completion_tokens"`
+	TotalTokens              int64                    `json:"total_tokens"`
+	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens,omitempty"`
+	PromptTokensDetails      *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails  *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+func (u *TokenUsage) CacheCreationTokenCount() int64 {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokensDetails == nil {
+		return u.CacheCreationInputTokens
+	}
+	if u.PromptTokensDetails.CacheCreationTokens > 0 {
+		return u.PromptTokensDetails.CacheCreationTokens
+	}
+	if u.CacheCreationInputTokens > 0 {
+		return u.CacheCreationInputTokens
+	}
+	return u.PromptTokensDetails.CacheWriteTokens
 }
 
 // PromptTokensDetails contains details about prompt token usage
 type PromptTokensDetails struct {
-	CachedTokens int64 `json:"cached_tokens,omitempty"`
+	CachedTokens        int64 `json:"cached_tokens,omitempty"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+	CacheWriteTokens    int64 `json:"cache_write_tokens,omitempty"`
 }
 
 // CompletionTokensDetails contains details about completion token usage

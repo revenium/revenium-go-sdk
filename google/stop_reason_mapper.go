@@ -15,14 +15,6 @@ import (
 //   - Revenium Metering API stopReason field (required):
 //     https://revenium.readme.io/reference/meter_ai_completion
 //
-// MAPPING RATIONALE:
-// - STOP (natural completion) -> END
-// - MAX_TOKENS (hit limit) -> TOKEN_LIMIT
-// - Safety/content blocks -> ERROR (catches all policy violations)
-// - Function call errors -> ERROR (invalid tool usage)
-// - CANCELLED/CANCELED -> CANCELLED (handles both spellings)
-// - Unknown/future values -> fallback with warning (resilience)
-//
 // RESILIENCE GUARANTEES:
 // - Never panics - always returns a valid Revenium enum value
 // - Handles empty strings gracefully
@@ -45,9 +37,12 @@ func MapGoogleFinishReason(finishReason genai.FinishReason, defaultReason core.R
 	// Token limits
 	case "MAX_TOKENS":
 		return core.StopReasonTokenLimit
+	case "TOO_MANY_TOOL_CALLS":
+		return core.StopReasonCompletionLimit
 
 	// Safety and content filtering (map to ERROR)
 	case "SAFETY",
+		"LANGUAGE",
 		"RECITATION",
 		"BLOCKLIST",
 		"PROHIBITED_CONTENT",

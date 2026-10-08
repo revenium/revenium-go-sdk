@@ -24,7 +24,7 @@ func MapFinishReason(finishReason string, defaultReason core.ReveniumStopReason)
 	case "CONTENT_FILTER":
 		return core.StopReasonError
 	case "TOOL_CALLS", "FUNCTION_CALL":
-		return core.StopReasonEnd
+		return core.StopReasonEndSequence
 	case "ERROR":
 		return core.StopReasonError
 	case "CANCELLED":

@@ -7,6 +7,7 @@
 
 # Test binary, built with `go test -c`
 *.test
+scripts/provider-surface-check/provider-surface-check
 
 # Output of the go coverage tool
 *.out

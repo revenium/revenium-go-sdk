@@ -911,8 +911,8 @@ This SDK follows [Semantic Versioning](https://semver.org/). The API is stable a
 
 - **Current version**: v1.x (stable)
 - **Backward compatibility**: Guaranteed within major versions
-- **Go versions**: 1.22 and 1.23 tested in CI
-- **Upstream SDKs**: Compatible with `openai-go/v3`, `anthropic-sdk-go v1.x`, `google.golang.org/genai v1.x`
+- **Go versions**: 1.25 and 1.26 tested in CI; `anthropic` and `google` require Go 1.24, `openai` and `perplexity` require Go 1.25, both floors set by their upstream SDKs
+- **Upstream SDKs**: tested against `openai-go/v3` v3.66, `anthropic-sdk-go` v1.76, `google.golang.org/genai` v1.71
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

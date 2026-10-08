@@ -200,6 +200,7 @@ func (c *CompletionsInterface) New(ctx context.Context, req ChatCompletionReques
 		if resp.Usage.PromptTokensDetails != nil {
 			cacheReadTokens = resp.Usage.PromptTokensDetails.CachedTokens
 		}
+		cacheCreationTokens = resp.Usage.CacheCreationTokenCount()
 	}
 
 	finishReason := ""

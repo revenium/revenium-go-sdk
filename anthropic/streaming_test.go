@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/revenium/revenium-go-sdk/core/testutil"
 	"github.com/stretchr/testify/assert"
@@ -62,6 +63,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 		totalTokens:          165,
 		cacheCreationTokens:  3,
 		cacheReadTokens:      2,
+		reasoningTokens:      7,
 		hasVision:            true,
 		accumulatedTextParts: []string{"hello", " world"},
 	}
@@ -79,6 +81,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 	assert.Equal(t, float64(120), p["inputTokenCount"])
 	assert.Equal(t, float64(45), p["outputTokenCount"])
 	assert.Equal(t, float64(165), p["totalTokenCount"])
+	assert.Equal(t, float64(7), p["reasoningTokenCount"])
 	assert.Equal(t, "END", p["stopReason"])
 	assert.Equal(t, "trace-x", p["traceId"])
 	attrs, _ := p["attributes"].(map[string]interface{})
@@ -112,4 +115,51 @@ func TestReconstructResponseFromChunks_EmptyContent(t *testing.T) {
 	msg := ReconstructResponseFromChunks(w)
 	require.NotNil(t, msg)
 	assert.Empty(t, msg.Content)
+}
+
+func TestStreamingWrapper_MessageDeltaCapturesThinkingTokens(t *testing.T) {
+	w := &StreamingWrapper{}
+	w.processTypedEvent(anthropicsdk.MessageStreamEventUnion{
+		Type: "message_delta",
+		Usage: anthropicsdk.MessageDeltaUsage{
+			OutputTokens:        45,
+			OutputTokensDetails: anthropicsdk.OutputTokensDetails{ThinkingTokens: 30},
+		},
+	})
+
+	assert.Equal(t, 45, w.outputTokens)
+	assert.Equal(t, 30, w.reasoningTokens)
+}
+
+func TestStreamingWrapper_MessageDeltaWithoutThinkingKeepsCapturedValue(t *testing.T) {
+	w := &StreamingWrapper{reasoningTokens: 30}
+	w.processTypedEvent(anthropicsdk.MessageStreamEventUnion{
+		Type:  "message_delta",
+		Usage: anthropicsdk.MessageDeltaUsage{OutputTokens: 50},
+	})
+
+	assert.Equal(t, 30, w.reasoningTokens)
+}
+
+func TestBuildAnthropicPayload_ForwardsThinkingTokens(t *testing.T) {
+	mock := testutil.NewMockMeteringServer()
+	defer mock.Close()
+	r := newTestAnthropic(t, mock.URL())
+	defer r.Close()
+
+	m := &MessagesInterface{parent: r}
+	resp := &anthropicsdk.Message{
+		Model:      "claude-sonnet-4-5",
+		StopReason: "end_turn",
+		Usage: anthropicsdk.Usage{
+			InputTokens:         100,
+			OutputTokens:        50,
+			OutputTokensDetails: anthropicsdk.OutputTokensDetails{ThinkingTokens: 40},
+		},
+	}
+
+	payload := m.buildAnthropicPayload(resp, nil, time.Second, "anthropic", time.Now(), false)
+
+	assert.Equal(t, int64(40), payload.ReasoningTokenCount)
+	assert.Equal(t, int64(150), payload.TotalTokenCount)
 }

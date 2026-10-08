@@ -9,9 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
-        go-version: ['1.22', '1.23']
+        go-version: ['1.25', '1.26']
         module:
           - core
           - openai
@@ -58,8 +59,42 @@ jobs:
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        if: matrix.go-version == '1.23'
+        if: matrix.go-version == '1.26'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.module }}
           path: ${{ matrix.module }}/coverage.out
+
+  test-minimum-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        module: [core, fal, runway, groq, grok, ollama, litellm, webhooks]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build and test ${{ matrix.module }} on the oldest supported toolchain
+        working-directory: ${{ matrix.module }}
+        run: |
+          GOWORK=off GOTOOLCHAIN=local go build ./...
+          GOWORK=off GOTOOLCHAIN=local go vet ./...
+          GOWORK=off GOTOOLCHAIN=local go test -race ./...
+
+  surface-check-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        go-version: ['1.25', '1.26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - run: cd scripts/provider-surface-check && go run . --selftest
