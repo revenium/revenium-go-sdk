@@ -44,6 +44,9 @@ type CircuitBreakerConfig struct {
 	SuccessThreshold int
 	TimeWindow       time.Duration
 	ShouldTrip       func(error) bool
+	// ConsecutiveFailures makes a success forget earlier failures, so only
+	// an unbroken run of FailureThreshold failures opens the breaker.
+	ConsecutiveFailures bool
 }
 
 type CircuitBreakerStats struct {
@@ -54,14 +57,15 @@ type CircuitBreakerStats struct {
 }
 
 type CircuitBreaker struct {
-	state             State
-	successCount      int
-	lastFailureTime   time.Time
-	lastCleanupTime   time.Time
-	failures          []time.Time
-	halfOpenInFlight  bool
-	config            CircuitBreakerConfig
-	mu                sync.RWMutex
+	state            State
+	successCount     int
+	reopenAt         time.Time
+	lastCleanupTime  time.Time
+	failures         []time.Time
+	halfOpenInFlight bool
+	generation       uint64
+	config           CircuitBreakerConfig
+	mu               sync.RWMutex
 }
 
 func NewCircuitBreaker(config CircuitBreakerConfig) *CircuitBreaker {
@@ -85,47 +89,81 @@ func NewCircuitBreaker(config CircuitBreakerConfig) *CircuitBreaker {
 	}
 }
 
+// Execute runs fn unless the breaker is open and records the outcome. Each
+// call belongs to the breaker state it was admitted under: when the breaker
+// has changed state since, the outcome is ignored, so a slow call admitted
+// before the breaker opened cannot end a later half-open probe or reopen the
+// breaker after the fact.
 func (cb *CircuitBreaker) Execute(fn func() error) error {
-	cb.mu.Lock()
-	if cb.state == StateOpen {
-		if time.Since(cb.lastFailureTime) >= cb.config.RecoveryTimeout {
-			cb.state = StateHalfOpen
-			cb.successCount = 0
-			core.Info("[CIRCUIT_BREAKER] OPEN -> HALF_OPEN: attempting recovery")
-		} else {
-			cb.mu.Unlock()
-			return ErrCircuitOpen
-		}
+	ticket, err := cb.admit()
+	if err != nil {
+		return err
 	}
-	if cb.state == StateHalfOpen && cb.halfOpenInFlight {
-		cb.mu.Unlock()
-		return ErrCircuitOpen
-	}
-	if cb.state == StateHalfOpen {
-		cb.halfOpenInFlight = true
-	}
-	cb.mu.Unlock()
 
 	defer func() {
 		if r := recover(); r != nil {
-			cb.RecordFailure()
+			cb.settle(ticket, true)
 			panic(r)
 		}
 	}()
 
-	err := fn()
-
-	if err != nil {
-		if cb.config.ShouldTrip == nil || cb.config.ShouldTrip(err) {
-			cb.RecordFailure()
-		} else {
-			cb.clearHalfOpenInFlight()
-		}
-	} else {
-		cb.RecordSuccess()
+	err = fn()
+	if err == nil {
+		cb.settle(ticket, false)
+		return nil
 	}
-
+	if cb.config.ShouldTrip == nil || cb.config.ShouldTrip(err) {
+		cb.settle(ticket, true)
+	} else {
+		cb.releaseProbe(ticket)
+	}
 	return err
+}
+
+func (cb *CircuitBreaker) admit() (uint64, error) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == StateOpen {
+		if time.Now().Before(cb.reopenAt) {
+			return 0, ErrCircuitOpen
+		}
+		cb.moveTo(StateHalfOpen)
+		cb.successCount = 0
+		core.Info("[CIRCUIT_BREAKER] OPEN -> HALF_OPEN: attempting recovery")
+	}
+	if cb.state == StateHalfOpen {
+		if cb.halfOpenInFlight {
+			return 0, ErrCircuitOpen
+		}
+		cb.halfOpenInFlight = true
+	}
+	return cb.generation, nil
+}
+
+func (cb *CircuitBreaker) settle(ticket uint64, failed bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if ticket != cb.generation {
+		return
+	}
+	if failed {
+		cb.onFailure()
+	} else {
+		cb.onSuccess()
+	}
+}
+
+func (cb *CircuitBreaker) releaseProbe(ticket uint64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if ticket == cb.generation {
+		cb.halfOpenInFlight = false
+	}
+}
+
+func (cb *CircuitBreaker) moveTo(state State) {
+	cb.state = state
+	cb.generation++
 }
 
 func (cb *CircuitBreaker) CanExecute() bool {
@@ -138,7 +176,7 @@ func (cb *CircuitBreaker) CanExecute() bool {
 	if cb.state == StateHalfOpen {
 		return !cb.halfOpenInFlight
 	}
-	return time.Since(cb.lastFailureTime) >= cb.config.RecoveryTimeout
+	return !time.Now().Before(cb.reopenAt)
 }
 
 func (cb *CircuitBreaker) RecordSuccess() {
@@ -170,9 +208,8 @@ func (cb *CircuitBreaker) GetStats() CircuitBreakerStats {
 	}
 
 	if cb.state == StateOpen {
-		elapsed := time.Since(cb.lastFailureTime)
-		if elapsed < cb.config.RecoveryTimeout {
-			stats.TimeUntilRecovery = cb.config.RecoveryTimeout - elapsed
+		if wait := time.Until(cb.reopenAt); wait > 0 {
+			stats.TimeUntilRecovery = wait
 		}
 	}
 
@@ -183,9 +220,9 @@ func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	cb.state = StateClosed
+	cb.moveTo(StateClosed)
 	cb.successCount = 0
-	cb.lastFailureTime = time.Time{}
+	cb.reopenAt = time.Time{}
 	cb.failures = make([]time.Time, 0)
 	cb.halfOpenInFlight = false
 	cb.lastCleanupTime = time.Now()
@@ -197,19 +234,21 @@ func (cb *CircuitBreaker) onSuccess() {
 		cb.halfOpenInFlight = false
 		cb.successCount++
 		if cb.successCount >= cb.config.SuccessThreshold {
-			cb.state = StateClosed
+			cb.moveTo(StateClosed)
 			cb.successCount = 0
 			cb.failures = make([]time.Time, 0)
 			core.Info("[CIRCUIT_BREAKER] HALF_OPEN -> CLOSED: recovery successful")
 		}
 	case StateClosed:
+		if cb.config.ConsecutiveFailures {
+			cb.failures = cb.failures[:0]
+		}
 		cb.performPeriodicCleanup()
 	}
 }
 
 func (cb *CircuitBreaker) onFailure() {
 	now := time.Now()
-	cb.lastFailureTime = now
 	cb.failures = append(cb.failures, now)
 
 	if len(cb.failures) > maxFailureHistory {
@@ -222,21 +261,38 @@ func (cb *CircuitBreaker) onFailure() {
 	switch cb.state {
 	case StateHalfOpen:
 		cb.halfOpenInFlight = false
-		cb.state = StateOpen
+		cb.moveTo(StateOpen)
 		cb.successCount = 0
+		cb.reopenAt = now.Add(cb.config.RecoveryTimeout)
 		core.Warn("[CIRCUIT_BREAKER] HALF_OPEN -> OPEN: failure during recovery")
 	case StateClosed:
 		if len(cb.failures) >= cb.config.FailureThreshold {
-			cb.state = StateOpen
+			cb.moveTo(StateOpen)
 			cb.successCount = 0
+			cb.reopenAt = now.Add(cb.config.RecoveryTimeout)
 			core.Warn("[CIRCUIT_BREAKER] CLOSED -> OPEN: failure threshold reached (%d/%d)", len(cb.failures), cb.config.FailureThreshold)
 		}
 	}
 }
 
-func (cb *CircuitBreaker) clearHalfOpenInFlight() {
+// HoldOpenFor keeps the breaker open for at least d, for a server that said
+// how long to wait (Retry-After) before it is called again.
+func (cb *CircuitBreaker) HoldOpenFor(d time.Duration) {
+	if d <= 0 {
+		return
+	}
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+
+	if until := time.Now().Add(d); until.After(cb.reopenAt) {
+		cb.reopenAt = until
+	}
+	if cb.state == StateOpen {
+		return
+	}
+	core.Warn("[CIRCUIT_BREAKER] %s -> OPEN: the server asked to wait %s before the next request", cb.state, d)
+	cb.moveTo(StateOpen)
+	cb.successCount = 0
 	cb.halfOpenInFlight = false
 }
 

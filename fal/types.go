@@ -16,10 +16,25 @@ type FalRequest struct {
 // FalImageResponse represents the response from Fal.ai image generation
 type FalImageResponse struct {
 	Images         []FalImage `json:"images"`
+	Image          *FalImage  `json:"image,omitempty"`
 	Seed           int        `json:"seed,omitempty"`
 	TimeTaken      float64    `json:"timeTaken,omitempty"`
 	HasNSFWContent []bool     `json:"has_nsfw_content,omitempty"`
 	Prompt         string     `json:"prompt,omitempty"`
+}
+
+// OutputImages returns the produced images, whether the endpoint answers with an `images` list or a single `image`
+func (r *FalImageResponse) OutputImages() []FalImage {
+	if r == nil {
+		return nil
+	}
+	if len(r.Images) > 0 {
+		return r.Images
+	}
+	if r.Image != nil {
+		return []FalImage{*r.Image}
+	}
+	return nil
 }
 
 // FalImage represents a single generated image
@@ -41,16 +56,42 @@ type FalVideoResponse struct {
 type FalVideo struct {
 	URL         string  `json:"url"`
 	Duration    float64 `json:"duration,omitempty"`
+	FPS         float64 `json:"fps,omitempty"`
+	NumFrames   float64 `json:"num_frames,omitempty"`
 	Width       int     `json:"width,omitempty"`
 	Height      int     `json:"height,omitempty"`
 	ContentType string  `json:"content_type,omitempty"`
 }
 
+// Seconds returns the length fal reported for the video, read from its duration or from its frame
+// count over its frame rate; 0 when fal reported neither.
+func (v FalVideo) Seconds() float64 {
+	if v.Duration > 0 {
+		return v.Duration
+	}
+	if v.NumFrames > 0 && v.FPS > 0 {
+		return v.NumFrames / v.FPS
+	}
+	return 0
+}
+
 // FalAudioResponse represents the response from Fal.ai audio generation
 type FalAudioResponse struct {
-	Audio     FalAudio `json:"audio"`
-	Prompt    string   `json:"prompt,omitempty"`
-	TimeTaken float64  `json:"timeTaken,omitempty"`
+	Audio      FalAudio `json:"audio"`
+	DurationMs float64  `json:"duration_ms,omitempty"`
+	Prompt     string   `json:"prompt,omitempty"`
+	TimeTaken  float64  `json:"timeTaken,omitempty"`
+}
+
+// DurationSeconds returns the audio length, read from the audio file or from the top-level `duration_ms`
+func (r *FalAudioResponse) DurationSeconds() float64 {
+	if r == nil {
+		return 0
+	}
+	if r.Audio.Duration > 0 {
+		return r.Audio.Duration
+	}
+	return r.DurationMs / 1000
 }
 
 // FalAudio represents a generated audio file
@@ -115,4 +156,3 @@ func (e *FalError) Error() string {
 	}
 	return e.ErrorText
 }
-

@@ -25,6 +25,7 @@ jobs:
           - perplexity
           - groq
           - grok
+          - webhooks
 
     steps:
       - uses: actions/checkout@v4
@@ -54,9 +55,9 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go vet ./...
 
-      - name: Test
+      - name: Test, failing if any test reaches a host that is not local
         working-directory: ${{ matrix.module }}
-        run: go test -race -coverprofile=coverage.out ./...
+        run: ../scripts/ci/run-with-egress-sink.sh go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
         if: matrix.go-version == '1.26'
@@ -70,21 +71,64 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        module: [core, fal, runway, groq, grok, ollama, litellm, webhooks]
+        module: [core, fal, runway, groq, grok, webhooks, ollama, litellm, anthropic, google, openai, perplexity]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: ${{ matrix.module }}/go.mod
 
-      - name: Build and test ${{ matrix.module }} on the oldest supported toolchain
+      - name: Build and test ${{ matrix.module }} on the Go version its go.mod declares
         working-directory: ${{ matrix.module }}
         run: |
           GOWORK=off GOTOOLCHAIN=local go build ./...
           GOWORK=off GOTOOLCHAIN=local go vet ./...
-          GOWORK=off GOTOOLCHAIN=local go test -race ./...
+          GOWORK=off GOTOOLCHAIN=local ../scripts/ci/run-with-egress-sink.sh go test -race ./...
+
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        go-version: ['1.25', '1.26']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Build, vet and test the examples against this checkout, failing if any test reaches a host that is not local
+        working-directory: examples
+        env:
+          GOWORK: 'off'
+        run: |
+          go build ./...
+          go vet ./...
+          ../scripts/ci/run-with-egress-sink.sh go test -race ./...
+
+  go-version-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the documented minimum Go check
+        run: scripts/ci/check-go-versions.test.sh
+      - name: Documented minimum Go versions match each go.mod
+        run: scripts/ci/check-go-versions.sh
+
+  core-requirement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the provider core requirement check
+        run: scripts/ci/check-core-requirement.test.sh
+      - name: Every provider go.mod requires the core version being released
+        run: scripts/ci/check-core-requirement.sh
 
   surface-check-selftest:
     runs-on: ubuntu-latest

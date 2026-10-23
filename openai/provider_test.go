@@ -75,14 +75,44 @@ func TestIsAzureURL(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "contains .azure.",
-			url:      "https://test.azure.example.com",
+			name:     "Cognitive Services host",
+			url:      "https://my-resource.cognitiveservices.azure.com",
 			expected: true,
 		},
 		{
-			name:     "contains azureopenai",
-			url:      "https://azureopenai.example.com",
+			name:     "AI Foundry host",
+			url:      "https://my-resource.services.ai.azure.com/models",
 			expected: true,
+		},
+		{
+			name:     "API Management host",
+			url:      "https://my-gateway.azure-api.net/openai",
+			expected: true,
+		},
+		{
+			name:     "US Government cloud host",
+			url:      "https://my-resource.openai.azure.us",
+			expected: true,
+		},
+		{
+			name:     "China cloud host",
+			url:      "https://my-resource.openai.azure.cn",
+			expected: true,
+		},
+		{
+			name:     "proxy whose host only mentions azureopenai",
+			url:      "https://azureopenai.proxy.example.com/v1",
+			expected: false,
+		},
+		{
+			name:     "host that only contains .azure. in the middle",
+			url:      "https://test.azure.example.com",
+			expected: false,
+		},
+		{
+			name:     "host that ends in azure.com without a dot boundary",
+			url:      "https://notazure.com",
+			expected: false,
 		},
 		{
 			name:     "OpenAI URL",
@@ -93,6 +123,21 @@ func TestIsAzureURL(t *testing.T) {
 			name:     "custom URL",
 			url:      "https://api.example.com",
 			expected: false,
+		},
+		{
+			name:     "azure only in the path",
+			url:      "https://proxy.example.com/azure.com/v1",
+			expected: false,
+		},
+		{
+			name:     "azureopenai only in the query",
+			url:      "https://api.openai.com/v1?route=azureopenai",
+			expected: false,
+		},
+		{
+			name:     "upper-case Azure host",
+			url:      "https://MY-RESOURCE.OPENAI.AZURE.COM/",
+			expected: true,
 		},
 	}
 

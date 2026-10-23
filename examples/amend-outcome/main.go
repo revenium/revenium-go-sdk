@@ -10,8 +10,13 @@ import (
 )
 
 func main() {
+	writeKey := os.Getenv("REVENIUM_WRITE_API_KEY")
+	if writeKey == "" {
+		log.Fatal("set REVENIUM_WRITE_API_KEY to a write key (rev_sk_): job and outcome calls refuse the metering key (rev_mk_)")
+	}
+
 	client, err := jobs.NewJobClient(jobs.JobClientConfig{
-		APIKey: os.Getenv("REVENIUM_METERING_API_KEY"),
+		APIKey: writeKey,
 		TeamID: os.Getenv("REVENIUM_TEAM_ID"),
 	})
 	if err != nil {

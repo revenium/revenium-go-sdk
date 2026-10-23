@@ -3,7 +3,6 @@ package prompt
 import (
 	"encoding/json"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -13,33 +12,13 @@ import (
 
 const (
 	DefaultMaxPromptSize = 50000
-	truncationSuffix     = "... [truncated]"
-	redacted             = "***REDACTED***"
+	truncationSuffix     = "...[TRUNCATED]"
 )
 
 type CapturedPrompts struct {
 	SystemPrompt string `json:"systemPrompt,omitempty"`
 	InputPrompt  string `json:"inputPrompt,omitempty"`
 	OutputText   string `json:"outputText,omitempty"`
-}
-
-var credentialPatterns = []struct {
-	regex       *regexp.Regexp
-	replacement string
-}{
-	{regexp.MustCompile(`pplx-[a-zA-Z0-9_-]{20,}`), "pplx-" + redacted},
-	{regexp.MustCompile(`sk-proj-[a-zA-Z0-9_-]{48,}`), "sk-proj-" + redacted},
-	{regexp.MustCompile(`sk-ant-[a-zA-Z0-9_-]{20,}`), "sk-ant-" + redacted},
-	{regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`), "sk-" + redacted},
-	{regexp.MustCompile(`AKIA[A-Z0-9]{16}`), "AKIA" + redacted},
-	{regexp.MustCompile(`ghp_[a-zA-Z0-9]{36,}`), "ghp_" + redacted},
-	{regexp.MustCompile(`ghs_[a-zA-Z0-9]{36,}`), "ghs_" + redacted},
-	{regexp.MustCompile(`eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`), "***REDACTED_JWT***"},
-	{regexp.MustCompile(`(?i)Bearer\s+[a-zA-Z0-9_\-.+/=]{20,}`), "Bearer " + redacted},
-	{regexp.MustCompile(`(?i)api[_-]?key["'\s:=]+[a-zA-Z0-9_\-.+/=]{20,}`), "api_key: " + redacted},
-	{regexp.MustCompile(`(?i)token["'\s:=]+[a-zA-Z0-9_\-.+/=]{20,}`), "token: " + redacted},
-	{regexp.MustCompile(`(?i)password\s*[:=]\s*["']?([^"'\s]{8,})["']?`), "password: " + redacted},
-	{regexp.MustCompile(`(?i)secret\s*[:=]\s*["']?([^"'\s]{8,})["']?`), "secret: " + redacted},
 }
 
 func ShouldCapturePrompts(metadata map[string]interface{}) bool {
@@ -53,17 +32,27 @@ func ShouldCapturePrompts(metadata map[string]interface{}) bool {
 			}
 		}
 	}
-	return strings.EqualFold(os.Getenv(core.EnvCapturePrompts), "true")
+	return core.IsEnvFlagSet(core.EnvCapturePrompts)
 }
 
-func SanitizeCredentials(text string) string {
-	if text == "" {
-		return text
+// WithClientCaptureSetting returns a copy of metadata in which a client's
+// own prompt-capture setting decides ShouldCapturePrompts, unless the call
+// set capturePrompts itself: the call's explicit choice always wins.
+func WithClientCaptureSetting(metadata map[string]interface{}, clientCapture bool) map[string]interface{} {
+	withSetting := core.CloneMetadata(metadata)
+	if withSetting == nil {
+		withSetting = map[string]interface{}{}
 	}
-	for _, p := range credentialPatterns {
-		text = p.regex.ReplaceAllString(text, p.replacement)
+	if _, set := withSetting["capturePrompts"]; !set {
+		withSetting["capturePrompts"] = clientCapture
 	}
-	return text
+	return withSetting
+}
+
+// CapturesFor reports whether a call's record carries its prompt and output: a capturePrompts
+// value in the call's metadata wins over the client's own setting.
+func CapturesFor(metadata map[string]interface{}, clientCapture bool) bool {
+	return ShouldCapturePrompts(WithClientCaptureSetting(metadata, clientCapture))
 }
 
 func GetMaxPromptSize() int {
@@ -79,12 +68,18 @@ func TruncateString(text string, maxSize int) string {
 	if text == "" || utf8.RuneCountInString(text) <= maxSize {
 		return text
 	}
+	return MarkTruncated(text, maxSize)
+}
+
+// MarkTruncated cuts text so that, with the truncation marker appended, it fits in maxSize
+// characters; it marks text that was already cut before it got here.
+func MarkTruncated(text string, maxSize int) string {
 	suffixLen := utf8.RuneCountInString(truncationSuffix)
-	if maxSize <= suffixLen {
-		return string([]rune(text)[:maxSize])
-	}
 	runes := []rune(text)
-	return string(runes[:maxSize-suffixLen]) + truncationSuffix
+	if maxSize <= suffixLen {
+		return string(runes[:min(len(runes), maxSize)])
+	}
+	return string(runes[:min(len(runes), maxSize-suffixLen)]) + truncationSuffix
 }
 
 func ExtractPrompts(messages interface{}, responseContent string, metadata map[string]interface{}) *CapturedPrompts {

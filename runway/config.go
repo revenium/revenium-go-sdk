@@ -87,7 +87,7 @@ func (c *Config) LoadFromEnv() error {
 	c.Revenium = core.MergeReveniumConfig(c.Revenium, core.LoadReveniumConfig())
 
 	if !c.capturePromptsSet {
-		c.CapturePrompts = os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "true" || os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "1"
+		c.CapturePrompts = core.IsEnvFlagSet(core.EnvCapturePrompts)
 	}
 
 	core.InitializeLogger()

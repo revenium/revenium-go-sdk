@@ -27,9 +27,10 @@ type ErrCostLimitExceeded struct {
 	// Action is the rule action that triggered the block (always BLOCK today,
 	// but retained for forward compatibility with future hard-stop actions).
 	Action Action
-	// Context carries the evaluation criteria that matched the rule —
-	// subscriberId, productName, model, provider. Surfaced so callers can log
-	// or surface which call was rejected.
+	// Context carries the request identifiers the rule was evaluated against —
+	// every EvalContext dimension (subscriber, product, model, provider, agent,
+	// organization, task type, credential). Surfaced so callers can log or
+	// surface which call was rejected.
 	Context EvalContext
 }
 

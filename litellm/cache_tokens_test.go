@@ -89,7 +89,7 @@ func TestCompletionsMapsCacheCreationTokensToPayload(t *testing.T) {
 
 	assert.Equal(t, float64(4096), payload["cacheCreationTokenCount"])
 	assert.Equal(t, float64(768), payload["cacheReadTokenCount"])
-	assert.Equal(t, float64(5120), payload["inputTokenCount"])
+	assert.Equal(t, float64(256), payload["inputTokenCount"])
 	assert.Equal(t, float64(128), payload["outputTokenCount"])
 	assert.Equal(t, float64(5248), payload["totalTokenCount"])
 }
@@ -125,7 +125,7 @@ func TestStreamingMapsCacheCreationTokensToPayload(t *testing.T) {
 	payload := singlePayload(t, r, mock)
 
 	assert.Equal(t, float64(4096), payload["cacheCreationTokenCount"])
-	assert.Equal(t, float64(5120), payload["inputTokenCount"])
+	assert.Equal(t, float64(1024), payload["inputTokenCount"])
 	assert.Equal(t, float64(128), payload["outputTokenCount"])
 	assert.Equal(t, float64(5248), payload["totalTokenCount"])
 }

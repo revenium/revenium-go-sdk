@@ -103,3 +103,20 @@ func TestInitializeLogger(t *testing.T) {
 	InitializeLogger()
 	assert.Equal(t, LogLevelError, globalLogger.GetLevel())
 }
+
+func TestMergeReveniumConfig_AConfigWithoutDebugKeepsDebugAnotherClientTurnedOn(t *testing.T) {
+	original := globalLogger
+	t.Cleanup(func() {
+		globalLogger = original
+		SetGlobalDebug(false)
+	})
+	globalLogger = NewDefaultLogger()
+	t.Setenv(EnvLogLevel, "")
+	t.Setenv(EnvDebug, "")
+
+	MergeReveniumConfig(&ReveniumConfig{Debug: true}, &ReveniumConfig{})
+	MergeReveniumConfig(&ReveniumConfig{}, &ReveniumConfig{})
+	InitializeLogger()
+
+	assert.Equal(t, LogLevelDebug, globalLogger.GetLevel())
+}

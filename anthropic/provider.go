@@ -9,7 +9,7 @@ import (
 type Provider string
 
 const (
-	ProviderAnthropic Provider = "ANTHROPIC"
+	ProviderAnthropic Provider = core.ProviderNameAnthropic
 	ProviderBedrock   Provider = "AWS"
 )
 

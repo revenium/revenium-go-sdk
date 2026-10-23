@@ -2,7 +2,6 @@ package fal
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 	"time"
 
@@ -10,27 +9,22 @@ import (
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
 
+const (
+	meteredModelPrefix = "fal_ai/"
+	falOwnNamespace    = "fal-ai/"
+)
+
+// normalizeModelName names a fal endpoint the way the price catalog does: "fal_ai/" followed by
+// the endpoint id, whose first segment is the publishing namespace ("fal-ai", or a partner such as
+// "bria"). Only an id with no namespace at all is malformed.
 func normalizeModelName(model string) string {
-	const litellmPrefix = "fal_ai/"
-	const falEndpointPrefix = "fal-ai/"
-
-	if strings.HasPrefix(model, litellmPrefix+falEndpointPrefix) {
-		return model
+	endpointID := strings.TrimPrefix(model, meteredModelPrefix)
+	if !strings.Contains(strings.Trim(endpointID, "/"), "/") {
+		core.Warn("Model name '%s' has no namespace segment. Recording it as '%s%s%s'",
+			model, meteredModelPrefix, falOwnNamespace, endpointID)
+		return meteredModelPrefix + falOwnNamespace + endpointID
 	}
-
-	if strings.HasPrefix(model, litellmPrefix) {
-		remainder := strings.TrimPrefix(model, litellmPrefix)
-		core.Warn("Model name '%s' has 'fal_ai/' prefix but missing 'fal-ai/' segment. Auto-normalizing.", model)
-		return litellmPrefix + falEndpointPrefix + remainder
-	}
-
-	if strings.HasPrefix(model, falEndpointPrefix) {
-		return litellmPrefix + model
-	}
-
-	core.Warn("Model name '%s' is missing 'fal-ai/' prefix. Auto-normalizing to '%s%s%s'",
-		model, litellmPrefix, falEndpointPrefix, model)
-	return litellmPrefix + falEndpointPrefix + model
+	return meteredModelPrefix + endpointID
 }
 
 func buildImageMeteringPayload(
@@ -41,23 +35,21 @@ func buildImageMeteringPayload(
 	requestTime time.Time,
 	capturePrompts bool,
 	prompt string,
-	outputURLs []string,
 ) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationImage, normalizeModelName(model), "fal_ai").
 		WithTiming(requestTime, duration).
 		WithModelSource("FAL").
 		WithOperationSubtype(detectImageSubtype(model))
 
+	images := imageResp.OutputImages()
 	if imageResp != nil {
-		imageCount := len(imageResp.Images)
-		b.WithImageBilling(imageCount, imageCount)
-
-		if len(imageResp.Images) > 0 {
-			b.WithAttributes(map[string]interface{}{
-				"width":  imageResp.Images[0].Width,
-				"height": imageResp.Images[0].Height,
-			})
-		}
+		b.WithImageBilling(len(images), len(images))
+	}
+	if len(images) > 0 {
+		b.WithAttributes(map[string]interface{}{
+			"width":  images[0].Width,
+			"height": images[0].Height,
+		})
 	}
 
 	payload := b.Build()
@@ -65,12 +57,12 @@ func buildImageMeteringPayload(
 
 	if capturePrompts {
 		output := ""
-		if len(outputURLs) > 0 {
+		if outputURLs := imageLinks(images); len(outputURLs) > 0 {
 			if outputJSON, err := json.Marshal(outputURLs); err == nil {
 				output = string(outputJSON)
 			}
 		}
-		applyCapturedPrompt(payload, prompt, output)
+		metering.ApplyCapturedPrompt(payload, prompt, output)
 	}
 
 	return payload
@@ -82,7 +74,7 @@ func buildVideoMeteringPayload(
 	metadata map[string]interface{},
 	duration time.Duration,
 	requestTime time.Time,
-	requestedDuration string,
+	requestedSeconds float64,
 	capturePrompts bool,
 	prompt string,
 	outputURL string,
@@ -92,31 +84,20 @@ func buildVideoMeteringPayload(
 		WithModelSource("FAL").
 		WithOperationSubtype(detectVideoSubtype(model))
 
-	var reqDurSeconds float64
-	if requestedDuration != "" {
-		trimmed := strings.TrimSpace(requestedDuration)
-		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
-			reqDurSeconds = parsed
-		} else {
-			core.Warn("Failed to parse requestedDuration '%s': %v - video billing may fail with 422", requestedDuration, err)
-		}
+	actualDur := requestedSeconds
+	requestedDur := requestedSeconds
+
+	if videoResp != nil && videoResp.Video.Seconds() > 0 {
+		actualDur = videoResp.Video.Seconds()
 	}
-
-	actualDur := reqDurSeconds
-	requestedDur := reqDurSeconds
-
-	if videoResp != nil && videoResp.Video.Duration > 0 {
-		actualDur = videoResp.Video.Duration
+	if requestedDur == 0 {
+		requestedDur = actualDur
 	}
-
-	if actualDur > 0 || requestedDur > 0 {
-		if actualDur == 0 {
-			actualDur = requestedDur
-		}
-		if requestedDur == 0 {
-			requestedDur = actualDur
-		}
-		b.WithVideoDuration(actualDur, requestedDur)
+	b.WithVideoDuration(actualDur, requestedDur)
+	if actualDur == 0 {
+		reason := unknownVideoLengthReason(model)
+		core.Warn("%s. Set duration on the request to bill the real length", reason)
+		b.WithError(reason)
 	}
 
 	if videoResp != nil {
@@ -136,7 +117,7 @@ func buildVideoMeteringPayload(
 	metering.ApplyMetadata(payload, metadata)
 
 	if capturePrompts {
-		applyCapturedPrompt(payload, prompt, outputURL)
+		metering.ApplyCapturedPrompt(payload, prompt, outputURL)
 	}
 
 	return payload
@@ -157,15 +138,15 @@ func buildAudioMeteringPayload(
 		WithModelSource("FAL").
 		WithOperationSubtype(detectAudioSubtype(model))
 
-	if audioResp != nil && audioResp.Audio.Duration > 0 {
-		b.WithAudioDuration(audioResp.Audio.Duration)
+	if seconds := audioResp.DurationSeconds(); seconds > 0 {
+		b.WithAudioDuration(seconds)
 	}
 
 	payload := b.Build()
 	metering.ApplyMetadata(payload, metadata)
 
 	if capturePrompts {
-		applyCapturedPrompt(payload, prompt, outputURL)
+		metering.ApplyCapturedPrompt(payload, prompt, outputURL)
 	}
 
 	return payload
@@ -184,29 +165,14 @@ func buildPayloadFromResult(
 ) *metering.MeteringPayload {
 	switch op {
 	case metering.OperationVideo:
-		return buildVideoMeteringPayload(model, videoFromMap(result), metadata, duration, requestTime, requestedDurationFromInput(input), capturePrompts, prompt, videoURLFromResult(result))
+		return buildVideoMeteringPayload(model, videoFromMap(result), metadata, duration, requestTime, requestedVideoSeconds(model, input), capturePrompts, prompt, capturableLink(videoURLFromResult(result)))
 	case metering.OperationAudio:
-		return buildAudioMeteringPayload(model, audioFromMap(result), metadata, duration, requestTime, capturePrompts, prompt, audioURLFromResult(result))
+		return buildAudioMeteringPayload(model, audioFromMap(result), metadata, duration, requestTime, capturePrompts, prompt, capturableLink(audioURLFromResult(result)))
 	case metering.OperationChat:
 		return buildChatMeteringPayload(model, result, metadata, duration, requestTime, capturePrompts, prompt)
 	default:
-		return buildImageMeteringPayload(model, imageFromMap(result), metadata, duration, requestTime, capturePrompts, prompt, imageURLsFromResult(result))
+		return buildImageMeteringPayload(model, imageFromMap(result), metadata, duration, requestTime, capturePrompts, prompt)
 	}
-}
-
-func requestedDurationFromInput(input map[string]interface{}) string {
-	if input == nil {
-		return ""
-	}
-	switch v := input["duration"].(type) {
-	case string:
-		return v
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case int:
-		return strconv.Itoa(v)
-	}
-	return ""
 }
 
 func imageFromMap(result map[string]interface{}) *FalImageResponse {
@@ -254,22 +220,11 @@ func audioFromMap(result map[string]interface{}) *FalAudioResponse {
 	return &resp
 }
 
-func imageURLsFromResult(result map[string]interface{}) []string {
-	if result == nil {
-		return nil
-	}
-	imgs, ok := result["images"].([]interface{})
-	if !ok {
-		return nil
-	}
+func imageLinks(images []FalImage) []string {
 	var urls []string
-	for _, img := range imgs {
-		m, ok := img.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if u, ok := m["url"].(string); ok && u != "" {
-			urls = append(urls, u)
+	for _, img := range images {
+		if link := capturableLink(img.URL); link != "" {
+			urls = append(urls, link)
 		}
 	}
 	return urls

@@ -6,13 +6,20 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
 // Run executes a synchronous fal request, auto-detecting media type and emitting metering accordingly.
 // endpointID is used literally (e.g., "fal-ai/flux/dev"); no prefix is stripped or added.
+// When the usage metadata on ctx and the metadata argument set the same field, the context value wins.
 func (r *ReveniumFal) Run(ctx context.Context, endpointID string, input map[string]interface{}, metadata map[string]interface{}) (map[string]interface{}, error) {
-	contextMeta := core.GetUsageMetadata(ctx)
-	mergedMeta := mergeMetadataMaps(contextMeta, metadata)
+	mergedMeta := core.UsageMetadataOver(ctx, metadata)
+	if err := r.enforcer.Check(evalContext(ctx, mergedMeta, endpointID)); err != nil {
+		core.Debug("Run blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	startTime := time.Now()
 
 	body, err := json.Marshal(input)
@@ -25,13 +32,16 @@ func (r *ReveniumFal) Run(ctx context.Context, endpointID string, input map[stri
 	duration := time.Since(startTime)
 
 	if err != nil {
+		r.recordFailure(endpointID, mergedMeta, startTime, false, err)
 		return nil, err
 	}
 
 	result := map[string]interface{}{}
 	if len(respBody) > 0 {
 		if jsonErr := json.Unmarshal(respBody, &result); jsonErr != nil {
-			return nil, core.NewProviderError("failed to parse response", jsonErr)
+			err = core.NewProviderError("failed to parse response", jsonErr)
+			r.recordFailure(endpointID, mergedMeta, startTime, false, err)
+			return nil, err
 		}
 	}
 
@@ -43,10 +53,14 @@ func (r *ReveniumFal) meterResult(endpointID string, result map[string]interface
 	if !r.enabled.Load() {
 		return
 	}
+	r.sendResultRecord(endpointID, result, metadata, duration, startTime, input)
+}
 
+func (r *ReveniumFal) sendResultRecord(endpointID string, result map[string]interface{}, metadata map[string]interface{}, duration time.Duration, startTime time.Time, input map[string]interface{}) {
+	fields := meteredInputFields(input)
 	op := DetectMediaType(endpointID, result)
-	prompt := promptFromInput(input)
-	payload := buildPayloadFromResult(endpointID, op, result, input, metadata, duration, startTime, r.config.CapturePrompts, prompt)
+	r.rememberOperation(endpointID, op)
+	payload := buildPayloadFromResult(endpointID, op, result, fields, metadata, duration, startTime, prompt.CapturesFor(metadata, r.config.CapturePrompts), promptFromInput(fields))
 	if payload != nil {
 		r.metering.Send(payload)
 	}
@@ -67,16 +81,6 @@ func promptFromInput(input map[string]interface{}) string {
 	return ""
 }
 
-func mergeMetadataMaps(contextMeta, argMeta map[string]interface{}) map[string]interface{} {
-	if len(contextMeta) == 0 && len(argMeta) == 0 {
-		return nil
-	}
-	merged := make(map[string]interface{}, len(contextMeta)+len(argMeta))
-	for k, v := range argMeta {
-		merged[k] = v
-	}
-	for k, v := range contextMeta {
-		merged[k] = v
-	}
-	return merged
+func evalContext(ctx context.Context, mergedMeta map[string]interface{}, endpointID string) enforcement.EvalContext {
+	return enforcement.NewEvalContextFromMetadata(ctx, mergedMeta, normalizeModelName(endpointID), "fal_ai")
 }

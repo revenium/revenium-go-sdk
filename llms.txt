@@ -1,0 +1,69 @@
+# Revenium Go SDK
+
+> Go SDK for automatic AI usage metering, cost tracking, and analytics across 13 providers.
+
+Revenium wraps your existing AI provider clients (OpenAI, Anthropic, Google, etc.) and sends metering data asynchronously to the Revenium platform, so metering never slows a call down. Calls reach the provider as you wrote them, except that a call breaching a cost-control block is refused before it is sent and a Claude call on Bedrock is converted to Bedrock's request format (see llms-full.txt). Each provider is its own Go module -- install only what you need.
+
+- License: MIT
+- Minimum Go: Go 1.21 to 1.25 by module (table below)
+- Version: v1.x (stable, semver)
+
+## Docs
+
+- [Full LLM Documentation](https://raw.githubusercontent.com/revenium/revenium-go-sdk/main/llms-full.txt): Complete SDK reference optimized for LLM consumption
+- [README](https://github.com/revenium/revenium-go-sdk/blob/main/README.md): Full documentation with examples
+- [Go Reference](https://pkg.go.dev/github.com/revenium/revenium-go-sdk): Godoc for all modules
+- [Changelog](https://github.com/revenium/revenium-go-sdk/blob/main/CHANGELOG.md): Release history
+- [Revenium Docs](https://docs.revenium.io): Platform documentation
+
+## Minimum Go version
+
+Each module declares its own minimum Go version in its `go.mod`, set by the module and the dependencies it pulls in. On an older Go, `go get` either fails with `requires go >= ...` or, when `GOTOOLCHAIN` allows downloads, fetches a newer Go and raises the `go` line in your `go.mod`. Check the row of every module you install; `core` comes in with every provider.
+
+| Module | Minimum Go |
+|---|---|
+| `core` | 1.21 |
+| `fal` | 1.21 |
+| `grok` | 1.21 |
+| `groq` | 1.21 |
+| `runway` | 1.21 |
+| `webhooks` | 1.21 |
+| `litellm` | 1.22 |
+| `ollama` | 1.22 |
+| `anthropic` | 1.24 |
+| `google` | 1.24 |
+| `openai` | 1.25 |
+| `perplexity` | 1.25 |
+
+## Modules
+
+- [core](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/core): Shared utilities, errors, logging, config, context helpers
+- [core/metering](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/core/metering): Metering client and tool event builder
+- [core/jobs](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/core/jobs): Job outcome tracking and amendment
+- [core/enforcement](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/core/enforcement): Cost control enforcement engine
+- [core/resilience](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/core/resilience): Circuit breaker, retry with jitter, error classification
+- [openai](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/openai): OpenAI and Azure OpenAI middleware
+- [anthropic](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/anthropic): Anthropic and Anthropic Bedrock middleware
+- [google](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/google): Google GenAI and Vertex AI middleware
+- [perplexity](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/perplexity): Perplexity middleware
+- [litellm](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/litellm): LiteLLM proxy middleware
+- [fal](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/fal): fal.ai middleware (image, video, audio, chat)
+- [runway](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/runway): Runway middleware
+- [ollama](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/ollama): Ollama middleware
+- [groq](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/groq): Groq middleware
+- [grok](https://pkg.go.dev/github.com/revenium/revenium-go-sdk/grok): Grok (xAI) middleware
+
+## Topics
+
+- [Installation](https://github.com/revenium/revenium-go-sdk#installation)
+- [Authentication](https://github.com/revenium/revenium-go-sdk#authentication)
+- [Quick Start](https://github.com/revenium/revenium-go-sdk#quick-start)
+- [Provider Guides](https://github.com/revenium/revenium-go-sdk#provider-guides)
+- [Streaming](https://github.com/revenium/revenium-go-sdk#streaming-example--openai)
+- [Error Handling](https://github.com/revenium/revenium-go-sdk#error-handling-pattern)
+- [Usage Metadata & Context](https://github.com/revenium/revenium-go-sdk#usage-metadata--context)
+- [Tool Metering](https://github.com/revenium/revenium-go-sdk#tool-metering)
+- [Job Outcomes](https://github.com/revenium/revenium-go-sdk#job-outcomes)
+- [Configuration Reference](https://github.com/revenium/revenium-go-sdk#configuration-options)
+- [Cost Controls / Enforcement](https://github.com/revenium/revenium-go-sdk#cost-controls--enforcement)
+- [Troubleshooting](https://github.com/revenium/revenium-go-sdk#troubleshooting)

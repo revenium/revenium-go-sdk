@@ -11,24 +11,14 @@ import (
 
 func strPtr(s string) *string { return &s }
 
-func TestMapRunwayStopReason(t *testing.T) {
-	tests := []struct {
-		name   string
-		status TaskStatus
-		err    *string
-		want   string
-	}{
-		{"failed", TaskStatusFailed, nil, "ERROR"},
-		{"canceled", TaskStatusCanceled, nil, "CANCELLED"},
-		{"succeeded", TaskStatusSucceeded, nil, "END"},
-		{"pending", TaskStatusPending, nil, "END"},
-		{"with error string", TaskStatusSucceeded, strPtr("boom"), "ERROR"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, mapRunwayStopReason(tt.status, tt.err))
-		})
-	}
+func TestBuildVideoMeteringPayload_StopReasonFollowsTheSDKsOwnReason(t *testing.T) {
+	succeeded := buildVideoMeteringPayload(&VideoGenerationResult{ID: "task-1", Model: "gen4_turbo", Status: TaskStatusSucceeded}, metering.SubtypeGeneration, 5, nil, false, time.Now())
+	assert.Equal(t, "END", succeeded.StopReason)
+	assert.Empty(t, succeeded.ErrorReason)
+
+	unfinished := buildVideoMeteringPayload(&VideoGenerationResult{ID: "task-1", Model: "gen4_turbo", Status: TaskStatusRunning, Error: strPtr("outcome unknown")}, metering.SubtypeGeneration, 5, nil, false, time.Now())
+	assert.Equal(t, "ERROR", unfinished.StopReason)
+	assert.Equal(t, "outcome unknown", unfinished.ErrorReason)
 }
 
 func TestBuildVideoMeteringPayload_BasicFields(t *testing.T) {
@@ -43,7 +33,7 @@ func TestBuildVideoMeteringPayload_BasicFields(t *testing.T) {
 		},
 		OutputURLs: []string{"https://x/out.mp4"},
 	}
-	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, nil, false, time.Now().Add(-12*time.Second))
+	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, 10, nil, false, time.Now().Add(-12*time.Second))
 	require.NotNil(t, payload)
 	assert.Equal(t, "VIDEO", payload.OperationType)
 	assert.Equal(t, "gen3a_turbo", payload.Model)
@@ -63,7 +53,7 @@ func TestBuildVideoMeteringPayload_AppliesUsageMetadata(t *testing.T) {
 		ProductName:      "prod-1",
 		TraceID:          "trace-1",
 	}
-	payload := buildVideoMeteringPayload(result, metering.SubtypeEdit, md, false, time.Now())
+	payload := buildVideoMeteringPayload(result, metering.SubtypeEdit, 5, usageMetadataToMap(md), false, time.Now())
 	require.NotNil(t, payload)
 	assert.Equal(t, "org-1", payload.OrganizationName)
 	assert.Equal(t, "prod-1", payload.ProductName)
@@ -79,7 +69,7 @@ func TestBuildVideoMeteringPayload_CustomMetadataOverridesSubtype(t *testing.T) 
 	md := &UsageMetadata{
 		Custom: map[string]interface{}{"operationSubtype": "extend"},
 	}
-	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, md, false, time.Now())
+	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, 5, usageMetadataToMap(md), false, time.Now())
 	require.NotNil(t, payload)
 	assert.Equal(t, metering.SubtypeExtend, payload.OperationSubtype)
 }

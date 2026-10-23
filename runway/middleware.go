@@ -2,10 +2,11 @@ package runway
 
 import (
 	"context"
+	"errors"
 	"sync"
-	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
 
@@ -14,79 +15,29 @@ type ReveniumRunway struct {
 	metering     *metering.MeteringClient
 	config       *Config
 	mu           sync.RWMutex
+	enforcer     *enforcement.Engine
+	polling      *PollingConfig
+	abandoned    core.BackgroundWaits
 }
 
-var (
-	globalClient *ReveniumRunway
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumRunway", func(c *ReveniumRunway) *core.ReveniumConfig { return c.config.Revenium })
 
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
-	core.InitializeLogger()
-	core.Info("Initializing Revenium Runway middleware...")
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumRunway, error) {
+		return buildSharedClient(cfg)
+	})
+}
+
+func buildSharedClient(cfg *Config) (*ReveniumRunway, error) {
+	core.InitializeLogger()
+	core.Info("Initializing Revenium Runway middleware...")
 
 	if err := cfg.LoadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	runwayClient := NewRunwayClient(cfg)
-
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
-	if err != nil {
-		return err
-	}
-
-	globalClient = &ReveniumRunway{
-		runwayClient: runwayClient,
-		metering:     mc,
-		config:       cfg,
-	}
-
-	initialized = true
-	core.Info("Revenium Runway middleware initialized successfully")
-	return nil
-}
-
-func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
-}
-
-func GetClient() (*ReveniumRunway, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
-}
-
-func NewReveniumRunway(cfg *Config) (*ReveniumRunway, error) {
-	if cfg == nil {
-		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -95,10 +46,43 @@ func NewReveniumRunway(cfg *Config) (*ReveniumRunway, error) {
 
 	runwayClient := NewRunwayClient(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
+	if err != nil {
+		return nil, err
+	}
+
+	candidate := &ReveniumRunway{
+		runwayClient: runwayClient,
+		metering:     mc,
+		config:       cfg,
+		enforcer:     enforcement.StartFor(cfg.Revenium),
+	}
+
+	core.Info("Revenium Runway middleware initialized successfully")
+	return candidate, nil
+}
+
+func IsInitialized() bool {
+	return sharedClient.IsInitialized()
+}
+
+func GetClient() (*ReveniumRunway, error) {
+	return sharedClient.Get()
+}
+
+func NewReveniumRunway(cfg *Config) (*ReveniumRunway, error) {
+	if cfg == nil {
+		return nil, core.NewConfigError("config cannot be nil", nil)
+	}
+	core.TrimReveniumConfig(cfg.Revenium)
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	runwayClient := NewRunwayClient(cfg)
+
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +91,7 @@ func NewReveniumRunway(cfg *Config) (*ReveniumRunway, error) {
 		runwayClient: runwayClient,
 		metering:     mc,
 		config:       cfg,
+		enforcer:     enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
@@ -116,149 +101,70 @@ func (r *ReveniumRunway) GetConfig() *Config {
 	return r.config
 }
 
+// ImageToVideo, VideoToVideo and UpscaleVideo record the usage metadata set on ctx with
+// core.WithUsageMetadata together with the metadata argument; when both set a field, the
+// context value wins, as it does for the fal module's Run, Subscribe and Stream.
 func (r *ReveniumRunway) ImageToVideo(ctx context.Context, req *ImageToVideoRequest, metadata *UsageMetadata) (*VideoGenerationResult, error) {
-	startTime := time.Now()
-
 	if req.Model == "" {
 		req.Model = "gen3a_turbo"
 	}
-
-	core.Debug("Creating image-to-video task with model: %s", req.Model)
-	taskResp, err := r.runwayClient.CreateImageToVideo(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	core.Info("Waiting for task %s to complete...", taskResp.ID)
-	statusResp, err := r.runwayClient.WaitForTaskCompletion(ctx, taskResp.ID, DefaultPollingConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	duration := time.Since(startTime)
-	result := &VideoGenerationResult{
-		ID:         taskResp.ID,
-		Status:     statusResp.Status,
-		OutputURLs: statusResp.Output,
-		Duration:   duration,
-		Model:      req.Model,
-		Metadata:   make(map[string]interface{}),
-	}
-
-	if req.Duration > 0 {
-		result.Metadata["requestedDuration"] = req.Duration
-	} else {
-		result.Metadata["requestedDuration"] = 5
-	}
-
-	if r.config.CapturePrompts && req.PromptText != "" {
-		result.Metadata["_capturedPrompt"] = req.PromptText
-	}
-
-	if statusResp.Error != nil {
-		result.Error = statusResp.Error
-	}
-	if statusResp.FailureCode != nil {
-		result.FailureCode = statusResp.FailureCode
-	}
-
-	payload := buildVideoMeteringPayload(result, metering.SubtypeGeneration, metadata, r.config.CapturePrompts, startTime)
-	r.metering.Send(payload)
-
-	return result, nil
+	videoSeconds := billedVideoSeconds(req.Model, float64(req.Duration), 0)
+	callMetadata := recordMetadata(ctx, metadata)
+	return r.runVideoTask(ctx, videoTask{
+		name: "image-to-video",
+		record: taskRecord{
+			model:        req.Model,
+			subtype:      metering.SubtypeGeneration,
+			videoSeconds: videoSeconds,
+			metadata:     callMetadata,
+			resultInfo:   r.generationResultInfo(videoSeconds, req.PromptText, callMetadata),
+		},
+		create: func(ctx context.Context) (*TaskResponse, error) {
+			return r.runwayClient.CreateImageToVideo(ctx, req)
+		},
+	})
 }
 
 func (r *ReveniumRunway) VideoToVideo(ctx context.Context, req *VideoToVideoRequest, metadata *UsageMetadata) (*VideoGenerationResult, error) {
-	startTime := time.Now()
-
 	if req.Model == "" {
 		req.Model = "gen3a_turbo"
 	}
-
-	core.Debug("Creating video-to-video task with model: %s", req.Model)
-	taskResp, err := r.runwayClient.CreateVideoToVideo(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	core.Info("Waiting for task %s to complete...", taskResp.ID)
-	statusResp, err := r.runwayClient.WaitForTaskCompletion(ctx, taskResp.ID, DefaultPollingConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	duration := time.Since(startTime)
-	result := &VideoGenerationResult{
-		ID:         taskResp.ID,
-		Status:     statusResp.Status,
-		OutputURLs: statusResp.Output,
-		Duration:   duration,
-		Model:      req.Model,
-		Metadata:   make(map[string]interface{}),
-	}
-
-	if req.Duration > 0 {
-		result.Metadata["requestedDuration"] = req.Duration
-	} else {
-		result.Metadata["requestedDuration"] = 5
-	}
-
-	if r.config.CapturePrompts && req.PromptText != "" {
-		result.Metadata["_capturedPrompt"] = req.PromptText
-	}
-
-	if statusResp.Error != nil {
-		result.Error = statusResp.Error
-	}
-	if statusResp.FailureCode != nil {
-		result.FailureCode = statusResp.FailureCode
-	}
-
-	payload := buildVideoMeteringPayload(result, metering.SubtypeEdit, metadata, r.config.CapturePrompts, startTime)
-	r.metering.Send(payload)
-
-	return result, nil
+	videoSeconds := billedVideoSeconds(req.Model, float64(req.Duration), req.SourceDurationSeconds)
+	callMetadata := recordMetadata(ctx, metadata)
+	return r.runVideoTask(ctx, videoTask{
+		name: "video-to-video",
+		record: taskRecord{
+			model:        req.Model,
+			subtype:      metering.SubtypeEdit,
+			videoSeconds: videoSeconds,
+			metadata:     callMetadata,
+			resultInfo:   r.generationResultInfo(videoSeconds, req.PromptText, callMetadata),
+		},
+		create: func(ctx context.Context) (*TaskResponse, error) {
+			return r.runwayClient.CreateVideoToVideo(ctx, req)
+		},
+	})
 }
 
 func (r *ReveniumRunway) UpscaleVideo(ctx context.Context, req *VideoUpscaleRequest, metadata *UsageMetadata) (*VideoGenerationResult, error) {
-	startTime := time.Now()
-
+	if !isBillableSeconds(req.SourceDurationSeconds) {
+		return nil, ErrMissingSourceDuration
+	}
 	if req.Model == "" {
 		req.Model = "upscale"
 	}
-
-	core.Debug("Creating video upscale task with model: %s", req.Model)
-	taskResp, err := r.runwayClient.CreateVideoUpscale(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	core.Info("Waiting for task %s to complete...", taskResp.ID)
-	statusResp, err := r.runwayClient.WaitForTaskCompletion(ctx, taskResp.ID, DefaultPollingConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	duration := time.Since(startTime)
-	result := &VideoGenerationResult{
-		ID:         taskResp.ID,
-		Status:     statusResp.Status,
-		OutputURLs: statusResp.Output,
-		Duration:   duration,
-		Model:      req.Model,
-	}
-
-	if statusResp.Error != nil {
-		result.Error = statusResp.Error
-	}
-	if statusResp.FailureCode != nil {
-		result.FailureCode = statusResp.FailureCode
-	}
-
-	payload := buildVideoMeteringPayload(result, metering.SubtypeUpscale, metadata, r.config.CapturePrompts, startTime)
-	r.metering.Send(payload)
-
-	return result, nil
+	return r.runVideoTask(ctx, videoTask{
+		name: "video upscale",
+		record: taskRecord{
+			model:        req.Model,
+			subtype:      metering.SubtypeUpscale,
+			videoSeconds: req.SourceDurationSeconds,
+			metadata:     recordMetadata(ctx, metadata),
+		},
+		create: func(ctx context.Context) (*TaskResponse, error) {
+			return r.runwayClient.CreateVideoUpscale(ctx, req)
+		},
+	})
 }
 
 func (r *ReveniumRunway) Flush() {
@@ -266,26 +172,15 @@ func (r *ReveniumRunway) Flush() {
 }
 
 func (r *ReveniumRunway) Close() error {
-	r.Flush()
+	r.abandoned.Stop()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if err := r.runwayClient.Close(); err != nil {
-		return err
-	}
-
-	return r.metering.Close()
+	r.enforcer.Release()
+	return errors.Join(r.runwayClient.Close(), r.metering.Close())
 }
 
 func Reset() {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if globalClient != nil {
-		globalClient.Close()
-		globalClient = nil
-	}
-
-	initialized = false
+	_ = sharedClient.ResetAndClose()
 }

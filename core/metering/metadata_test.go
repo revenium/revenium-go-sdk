@@ -1,9 +1,11 @@
 package metering
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,12 @@ func TestApplyMetadata_StringFields(t *testing.T) {
 	assert.Equal(t, "task-1", p.TaskID)
 	assert.Equal(t, "CUSTOM", p.ModelSource)
 	assert.Equal(t, "custom-tx", p.TransactionID)
+}
+
+func TestApplyMetadata_TransactionNameLandsOnTheRecord(t *testing.T) {
+	p := NewPayload(OperationChat, "gpt-4", "OPENAI").Build()
+	ApplyMetadata(p, map[string]interface{}{"transactionName": "x"})
+	assert.Equal(t, "x", wireFields(t, p)["transactionName"])
 }
 
 func TestApplyMetadata_FloatFields(t *testing.T) {
@@ -343,4 +351,14 @@ func TestApplyMetadata_OperationSubtype(t *testing.T) {
 			assert.Equal(t, tt.want, p.OperationSubtype)
 		})
 	}
+}
+
+func TestApplyMetadata_RecordCarriesTypedSubscriberFromContext(t *testing.T) {
+	ctx := core.WithSubscriber(context.Background(), &core.Subscriber{ID: "rt-sub-42", Email: "rt-sub@example.com"})
+	payload := &MeteringPayload{}
+
+	ApplyMetadata(payload, core.GetUsageMetadata(ctx))
+
+	assert.Equal(t, map[string]interface{}{"id": "rt-sub-42", "email": "rt-sub@example.com"}, payload.Subscriber)
+	assert.Equal(t, core.GetSubscriber(ctx).ID, payload.Subscriber["id"])
 }

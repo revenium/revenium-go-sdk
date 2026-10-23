@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -13,43 +12,8 @@ import (
 	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
-
-// enforcementBaseURL returns the base URL used for enforcement rule fetches,
-// falling back to the metering BaseURL when EnforcementBaseURL is unset.
-func enforcementBaseURL(rc *core.ReveniumConfig) string {
-	if rc == nil {
-		return ""
-	}
-	if rc.EnforcementBaseURL != "" {
-		return rc.EnforcementBaseURL
-	}
-	return rc.BaseURL
-}
-
-// buildEvalContext assembles the evaluation criteria for a pre-call
-// enforcement check. Subscriber identity comes from the request context
-// (core.WithSubscriber); productName is read from the usage metadata when
-// present. The provider string matches the metering payload's provider tag.
-func buildEvalContext(ctx context.Context, model string, provider string) enforcement.EvalContext {
-	ec := enforcement.EvalContext{
-		Model:    model,
-		Provider: provider,
-	}
-	if sub := core.GetSubscriber(ctx); sub != nil {
-		if sub.ID != "" {
-			ec.SubscriberID = sub.ID
-		} else if sub.Email != "" {
-			ec.SubscriberID = sub.Email
-		}
-	}
-	if md := core.GetUsageMetadata(ctx); md != nil {
-		if pn, ok := md["productName"].(string); ok {
-			ec.ProductName = pn
-		}
-	}
-	return ec
-}
 
 type ReveniumOpenAI struct {
 	client   openai.Client
@@ -57,27 +21,27 @@ type ReveniumOpenAI struct {
 	provider Provider
 	mu       sync.RWMutex
 	metering *metering.MeteringClient
+	enforcer *enforcement.Engine
 }
 
-var (
-	globalClient *ReveniumOpenAI
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumOpenAI", func(c *ReveniumOpenAI) *core.ReveniumConfig { return c.config.Revenium })
 
+// Initialize sets up the shared client for one Revenium account. A repeat
+// call, including one made while the first setup is still running, returns
+// nil when it names the same Revenium key, base URL and team, or none of
+// them, and a config error otherwise; use NewReveniumOpenAI for several
+// accounts in one process.
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumOpenAI, error) {
+		return buildSharedClient(cfg)
+	})
+}
 
+func buildSharedClient(cfg *Config) (*ReveniumOpenAI, error) {
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
@@ -85,106 +49,126 @@ func Initialize(opts ...Option) error {
 	core.Info("Initializing Revenium middleware...")
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
-	provider := DetectProvider(cfg)
-	clientOpts := buildClientOptions(cfg, provider)
-	openaiClient := openai.NewClient(clientOpts...)
-
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	provider, openaiClient, err := newProviderClient(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	globalClient = &ReveniumOpenAI{
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
+	if err != nil {
+		return nil, err
+	}
+
+	candidate := &ReveniumOpenAI{
 		client:   openaiClient,
 		config:   cfg,
 		provider: provider,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}
 
-	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
-
-	initialized = true
 	core.Info("Revenium middleware initialized successfully with provider: %s", provider)
-	return nil
+	return candidate, nil
 }
 
 func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
+	return sharedClient.IsInitialized()
 }
 
 func GetClient() (*ReveniumOpenAI, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
+	return sharedClient.Get()
 }
 
 func NewReveniumOpenAI(cfg *Config) (*ReveniumOpenAI, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if cfg.Revenium == nil || cfg.Revenium.APIKey == "" {
 		return nil, core.NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
 	}
 
-	provider := DetectProvider(cfg)
-	clientOpts := buildClientOptions(cfg, provider)
-	openaiClient := openai.NewClient(clientOpts...)
-
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	provider, openaiClient, err := newProviderClient(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	enforcement.Start(enforcementBaseURL(cfg.Revenium), cfg.Revenium.APIKey, cfg.Revenium.TeamID)
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
+	if err != nil {
+		return nil, err
+	}
 
 	return &ReveniumOpenAI{
 		client:   openaiClient,
 		config:   cfg,
 		provider: provider,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
-func buildClientOptions(cfg *Config, provider Provider) []option.RequestOption {
-	clientOpts := []option.RequestOption{}
-
-	if provider == ProviderAzure {
-		if cfg.AzureEndpoint != "" && cfg.AzureAPIVersion != "" {
-			clientOpts = append(clientOpts, azure.WithEndpoint(cfg.AzureEndpoint, cfg.AzureAPIVersion))
-			if cfg.AzureAPIKey != "" {
-				clientOpts = append(clientOpts, azure.WithAPIKey(cfg.AzureAPIKey))
-			}
-			core.Info("Configured Azure OpenAI with endpoint: %s, API version: %s", cfg.AzureEndpoint, cfg.AzureAPIVersion)
-		}
-	} else {
-		if cfg.OpenAIAPIKey != "" {
-			clientOpts = append(clientOpts, option.WithAPIKey(cfg.OpenAIAPIKey))
-		}
-		if cfg.OpenAIOrgID != "" {
-			clientOpts = append(clientOpts, option.WithOrganization(cfg.OpenAIOrgID))
-		}
-		if cfg.BaseURL != "" {
-			clientOpts = append(clientOpts, option.WithBaseURL(cfg.BaseURL))
-		}
+func newProviderClient(cfg *Config) (Provider, openai.Client, error) {
+	provider := DetectProvider(cfg)
+	if err := cfg.validateAzure(provider); err != nil {
+		return provider, openai.Client{}, err
 	}
+	return provider, openai.NewClient(buildClientOptions(cfg, provider)...), nil
+}
 
+func buildClientOptions(cfg *Config, provider Provider) []option.RequestOption {
+	if provider.IsAzure() {
+		return azureClientOptions(cfg)
+	}
+	return openAIClientOptions(cfg)
+}
+
+func azureClientOptions(cfg *Config) []option.RequestOption {
+	endpoint := cfg.azureEndpoint()
+	if isAzureV1Endpoint(endpoint) {
+		return azureV1ClientOptions(cfg, endpoint)
+	}
+	endpoint = azureResourceEndpoint(endpoint)
+	version := cfg.azureAPIVersion()
+	core.Info("Configured Azure OpenAI with endpoint: %s, API version: %s", endpoint, version)
+	return []option.RequestOption{
+		azure.WithEndpoint(endpoint, version),
+		azure.WithAPIKey(cfg.AzureAPIKey),
+	}
+}
+
+// azureV1ClientOptions sends the Azure key as a Bearer API key, as Azure's v1
+// setup for the OpenAI client documents, and clears OPENAI_* organization, project
+// and admin-key values the client would otherwise read from the environment.
+func azureV1ClientOptions(cfg *Config, endpoint string) []option.RequestOption {
+	core.Info("Configured Azure OpenAI v1 API with endpoint: %s", endpoint)
+	opts := []option.RequestOption{
+		option.WithBaseURL(endpoint),
+		option.WithAdminAPIKey(""),
+		option.WithAPIKey(cfg.AzureAPIKey),
+		option.WithHeaderDel("OpenAI-Organization"),
+		option.WithHeaderDel("OpenAI-Project"),
+	}
+	if cfg.AzureAPIVersion != "" {
+		opts = append(opts, option.WithQueryAdd("api-version", cfg.AzureAPIVersion))
+	}
+	return opts
+}
+
+func openAIClientOptions(cfg *Config) []option.RequestOption {
+	clientOpts := []option.RequestOption{}
+	if cfg.OpenAIAPIKey != "" {
+		clientOpts = append(clientOpts, option.WithAPIKey(cfg.OpenAIAPIKey))
+	}
+	if cfg.OpenAIOrgID != "" {
+		clientOpts = append(clientOpts, option.WithOrganization(cfg.OpenAIOrgID))
+	}
+	if cfg.BaseURL != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(cfg.BaseURL))
+	}
 	return clientOpts
 }
 
@@ -200,6 +184,8 @@ func (r *ReveniumOpenAI) GetProvider() Provider {
 	return r.provider
 }
 
+// GetOpenAIClient returns the provider's own client. Calls made through it are
+// neither recorded nor checked against cost controls.
 func (r *ReveniumOpenAI) GetOpenAIClient() openai.Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -273,6 +259,7 @@ func (r *ReveniumOpenAI) Flush() {
 func (r *ReveniumOpenAI) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
@@ -302,244 +289,176 @@ type CompletionsInterface struct {
 func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatCompletionNewParams) (*openai.ChatCompletion, error) {
 	metadata := core.GetUsageMetadata(ctx)
 
-	providerTag := "OPENAI"
-	if c.provider == ProviderAzure {
-		providerTag = "AZURE"
-	}
-	if err := enforcement.Check(buildEvalContext(ctx, string(params.Model), providerTag)); err != nil {
+	if err := c.parent.checkCostControls(ctx, string(params.Model), c.provider, c.provider.recordsServedChatModel()); err != nil {
 		core.Debug("Chat.Completions.New blocked by enforcement: %v", err)
 		return nil, err
 	}
 
-	switch c.provider {
-	case ProviderOpenAI:
-		return c.createCompletionOpenAI(ctx, params, metadata)
-	case ProviderAzure:
-		return c.createCompletionAzure(ctx, params, metadata)
-	default:
-		return nil, core.NewProviderError("unknown provider", fmt.Errorf("provider: %v", c.provider))
-	}
+	return c.createCompletion(ctx, params, metadata)
 }
 
 func (c *CompletionsInterface) NewStreaming(ctx context.Context, params openai.ChatCompletionNewParams) (*StreamingWrapper, error) {
 	metadata := core.GetUsageMetadata(ctx)
 
-	providerTag := "OPENAI"
-	if c.provider == ProviderAzure {
-		providerTag = "AZURE"
-	}
-	if err := enforcement.Check(buildEvalContext(ctx, string(params.Model), providerTag)); err != nil {
+	if err := c.parent.checkCostControls(ctx, string(params.Model), c.provider, c.provider.recordsServedChatModel()); err != nil {
 		core.Debug("Chat.Completions.NewStreaming blocked by enforcement: %v", err)
 		return nil, err
 	}
 
-	switch c.provider {
-	case ProviderOpenAI:
-		return c.createCompletionStreamingOpenAI(ctx, params, metadata)
-	case ProviderAzure:
-		return c.createCompletionStreamingAzure(ctx, params, metadata)
-	default:
-		return nil, core.NewProviderError("unknown provider", fmt.Errorf("provider: %v", c.provider))
-	}
+	return c.startStreaming(ctx, params, metadata, c.provider), nil
 }
 
-func (c *CompletionsInterface) buildResponsePayload(resp *openai.ChatCompletion, md map[string]interface{}, isStreamed bool, duration time.Duration, provider string, requestTime time.Time, completionStartTime *time.Time, timeToFirstToken int64) *metering.MeteringPayload {
-	if provider == "" {
-		provider = "OPENAI"
-	}
-
-	reasoningTokens := resp.Usage.CompletionTokensDetails.ReasoningTokens
-	cacheReadTokens := resp.Usage.PromptTokensDetails.CachedTokens
-
+func (c *CompletionsInterface) buildResponsePayload(resp *openai.ChatCompletion, model string, md map[string]interface{}, isStreamed bool, duration time.Duration, provider Provider, requestTime time.Time, completionStartTime *time.Time, timeToFirstToken int64) *metering.MeteringPayload {
 	openaiFinishReason := ""
 	if len(resp.Choices) > 0 {
 		openaiFinishReason = resp.Choices[0].FinishReason
 	}
-	stopReason := string(MapOpenAIFinishReason(openaiFinishReason, core.StopReasonEnd))
 
-	payload := metering.NewPayload(metering.OperationChat, string(resp.Model), provider).
+	payload := completionUsagePayload(model, provider, resp.Usage, openaiFinishReason, resp.SystemFingerprint).
 		WithTiming(requestTime, duration).
-		WithTokens(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens).
-		WithReasoningTokens(reasoningTokens, 0, cacheReadTokens).
 		WithStreaming(isStreamed, timeToFirstToken, completionStartTime).
+		Build()
+
+	metering.ApplyMetadata(payload, md)
+	return payload
+}
+
+func completionUsagePayload(model string, provider Provider, usage openai.CompletionUsage, finishReason, systemFingerprint string) *metering.PayloadBuilder {
+	stopReason := string(MapOpenAIFinishReason(finishReason, core.StopReasonEnd))
+	return chatTokenUsage(usage).chatRecord(provider, model).
 		WithStopReason(stopReason).
-		WithSystemFingerprint(resp.SystemFingerprint).
-		Build()
-
-	metering.ApplyMetadata(payload, md)
-	return payload
+		WithSystemFingerprint(systemFingerprint)
 }
 
-func (c *CompletionsInterface) buildErrorPayload(model string, md map[string]interface{}, isStreamed bool, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
-	if provider == "" {
-		provider = "OPENAI"
-	}
-
-	payload := metering.NewPayload(metering.OperationChat, model, provider).
-		WithTiming(requestTime, duration).
-		WithStreaming(isStreamed, 0, nil).
-		WithError(errorReason).
-		Build()
-
-	metering.ApplyMetadata(payload, md)
-	return payload
-}
-
-func (c *CompletionsInterface) createCompletionOpenAI(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}) (*openai.ChatCompletion, error) {
+func (c *CompletionsInterface) createCompletion(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}) (*openai.ChatCompletion, error) {
 	requestTime := time.Now()
+	model := string(params.Model)
+	provider := c.provider
 
 	resp, err := c.client.Chat.Completions.New(ctx, params)
+	duration := time.Since(requestTime)
 	if err != nil {
-		duration := time.Since(requestTime)
-		payload := c.buildErrorPayload(string(params.Model), metadata, false, duration, "OPENAI", requestTime, err.Error())
-		c.parent.metering.Send(payload)
+		c.parent.metering.Send(chatFailureRecord(provider, model, metadata, false, requestTime, duration, err))
 		return nil, err
 	}
 
-	duration := time.Since(requestTime)
-	payload := c.buildResponsePayload(resp, metadata, false, duration, "OPENAI", requestTime, nil, 0)
+	payload := c.buildResponsePayload(resp, provider.chatRecordModel(model, resp.Model), metadata, false, duration, provider, requestTime, nil, 0)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture { return chatCapture(params, chatReply(resp)) })
 	c.parent.metering.Send(payload)
-
 	return resp, nil
 }
 
-func (c *CompletionsInterface) createCompletionAzure(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}) (*openai.ChatCompletion, error) {
-	requestTime := time.Now()
-	originalModel := string(params.Model)
-	core.Debug("Using Azure deployment name '%s' from user", originalModel)
-
-	resp, err := c.client.Chat.Completions.New(ctx, params)
-	if err != nil {
-		core.Warn("Azure request failed: %v, falling back to OpenAI", err)
-		duration := time.Since(requestTime)
-		payload := c.buildErrorPayload(originalModel, metadata, false, duration, "AZURE", requestTime, err.Error())
-		c.parent.metering.Send(payload)
-		return c.createCompletionOpenAI(ctx, params, metadata)
-	}
-
-	duration := time.Since(requestTime)
-	payload := c.buildResponsePayload(resp, metadata, false, duration, "AZURE", requestTime, nil, 0)
-	c.parent.metering.Send(payload)
-
-	return resp, nil
-}
-
-func (c *CompletionsInterface) createCompletionStreamingOpenAI(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}) (*StreamingWrapper, error) {
+func (c *CompletionsInterface) startStreaming(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}, provider Provider) *StreamingWrapper {
+	model := string(params.Model)
+	streamOptions, callerRequestedUsage := withUsageReporting(params.StreamOptions)
+	params.StreamOptions = streamOptions
+	clock := startStreamClock()
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 
-	streamMetadata := make(map[string]interface{})
-	if metadata != nil {
-		for k, v := range metadata {
-			streamMetadata[k] = v
-		}
+	streamMetadata := make(map[string]interface{}, len(metadata)+1)
+	for k, v := range metadata {
+		streamMetadata[k] = v
 	}
-
 	if _, ok := streamMetadata["model"]; !ok {
-		streamMetadata["model"] = string(params.Model)
+		streamMetadata["model"] = model
 	}
 
 	return &StreamingWrapper{
-		stream:      stream,
-		config:      c.config,
-		metadata:    streamMetadata,
-		startTime:   time.Now(),
-		completions: c,
-		model:       string(params.Model),
-		provider:    "OPENAI",
-		parent:      c.parent,
-	}, nil
+		stream:         stream,
+		config:         c.config,
+		metadata:       streamMetadata,
+		clock:          clock,
+		completions:    c,
+		model:          model,
+		provider:       provider,
+		parent:         c.parent,
+		hideUsageChunk: !callerRequestedUsage,
+		params:         params,
+		reply:          metering.ReplyCollectorFor(metadata),
+	}
 }
 
-func (c *CompletionsInterface) createCompletionStreamingAzure(ctx context.Context, params openai.ChatCompletionNewParams, metadata map[string]interface{}) (*StreamingWrapper, error) {
-	originalModel := string(params.Model)
-	core.Debug("Using Azure deployment name '%s' from user", originalModel)
-
-	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
-
-	streamMetadata := make(map[string]interface{})
-	if metadata != nil {
-		for k, v := range metadata {
-			streamMetadata[k] = v
-		}
-	}
-
-	if _, ok := streamMetadata["model"]; !ok {
-		streamMetadata["model"] = originalModel
-	}
-
-	return &StreamingWrapper{
-		stream:      stream,
-		config:      c.config,
-		metadata:    streamMetadata,
-		startTime:   time.Now(),
-		completions: c,
-		model:       originalModel,
-		provider:    "AZURE",
-		parent:      c.parent,
-	}, nil
+func withUsageReporting(options openai.ChatCompletionStreamOptionsParam) (openai.ChatCompletionStreamOptionsParam, bool) {
+	callerRequestedUsage := options.IncludeUsage.Valid() && options.IncludeUsage.Value
+	options.IncludeUsage = openai.Bool(true)
+	return options, callerRequestedUsage
 }
 
 type StreamingWrapper struct {
 	stream         *ssestream.Stream[openai.ChatCompletionChunk]
 	config         *Config
 	metadata       map[string]interface{}
-	startTime      time.Time
-	firstTokenTime *time.Time
+	clock          streamClock
 	completions    *CompletionsInterface
 	model          string
-	provider       string
+	provider       Provider
 	parent         *ReveniumOpenAI
+	hideUsageChunk bool
 	mu             sync.Mutex
+	closed         bool
 
-	inputTokens         int64
-	outputTokens        int64
-	totalTokens         int64
-	reasoningTokens     int64
-	cacheReadTokens     int64
-	cacheCreationTokens int64
+	params openai.ChatCompletionNewParams
+	reply  *prompt.ReplyCollector
+
+	usage tokenUsage
 
 	finishReason      string
 	systemFingerprint string
+	servedModel       string
 }
 
 func (sw *StreamingWrapper) Next() bool {
-	return sw.stream.Next()
+	for sw.stream.Next() {
+		chunk := sw.stream.Current()
+		sw.recordChunk(chunk)
+		if !sw.isHiddenUsageChunk(chunk) {
+			return true
+		}
+	}
+	sw.markExhausted()
+	return false
+}
+
+func (sw *StreamingWrapper) markExhausted() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.clock.markExhausted()
 }
 
 func (sw *StreamingWrapper) Current() openai.ChatCompletionChunk {
-	chunk := sw.stream.Current()
+	return sw.stream.Current()
+}
 
+func (sw *StreamingWrapper) isHiddenUsageChunk(chunk openai.ChatCompletionChunk) bool {
+	return sw.hideUsageChunk && len(chunk.Choices) == 0 && chunk.JSON.Usage.Valid()
+}
+
+func (sw *StreamingWrapper) recordChunk(chunk openai.ChatCompletionChunk) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if sw.firstTokenTime == nil && len(chunk.Choices) > 0 {
-		now := time.Now()
-		sw.firstTokenTime = &now
-	}
+	sw.clock.observe(chatChunkHasOutput(chunk), chatChoiceProgress(chunk))
 
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
-		sw.inputTokens = chunk.Usage.PromptTokens
-		sw.outputTokens = chunk.Usage.CompletionTokens
-		sw.totalTokens = chunk.Usage.TotalTokens
-
-		if chunk.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
-			sw.reasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
-		}
-
-		if chunk.Usage.PromptTokensDetails.CachedTokens > 0 {
-			sw.cacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
-		}
+		sw.usage = chatTokenUsage(chunk.Usage)
 	}
 
-	if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-		sw.finishReason = chunk.Choices[0].FinishReason
+	if finishReason := choiceZero(chunk).FinishReason; finishReason != "" {
+		sw.finishReason = finishReason
 	}
 
 	if chunk.SystemFingerprint != "" {
 		sw.systemFingerprint = chunk.SystemFingerprint
 	}
 
-	return chunk
+	if sw.servedModel == "" {
+		sw.servedModel = chunk.Model
+	}
+
+	sw.reply.Add(chunkReply(chunk))
+	if chunkFinished(chunk) {
+		sw.reply.End()
+	}
 }
 
 func (sw *StreamingWrapper) Err() error {
@@ -547,25 +466,16 @@ func (sw *StreamingWrapper) Err() error {
 }
 
 func (sw *StreamingWrapper) Close() error {
-	err := sw.stream.Close()
-	streamErr := sw.stream.Err()
-	duration := time.Since(sw.startTime)
-
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if streamErr != nil {
-		payload := sw.completions.buildErrorPayload(sw.model, sw.metadata, true, duration, sw.provider, sw.startTime, streamErr.Error())
-		sw.parent.metering.Send(payload)
-		return err
+	if sw.closed {
+		return nil
 	}
+	sw.closed = true
 
-	timeToFirstToken := int64(0)
-	var completionStartTime *time.Time
-	if sw.firstTokenTime != nil {
-		timeToFirstToken = sw.firstTokenTime.Sub(sw.startTime).Milliseconds()
-		completionStartTime = sw.firstTokenTime
-	}
+	err := sw.stream.Close()
+	streamErr := sw.stream.Err()
 
 	finishReason := sw.finishReason
 	if finishReason == "" {
@@ -574,16 +484,14 @@ func (sw *StreamingWrapper) Close() error {
 
 	stopReason := string(MapOpenAIFinishReason(finishReason, core.StopReasonEnd))
 
-	payload := metering.NewPayload(metering.OperationChat, sw.model, sw.provider).
-		WithTiming(sw.startTime, duration).
-		WithTokens(sw.inputTokens, sw.outputTokens, sw.totalTokens).
-		WithReasoningTokens(sw.reasoningTokens, sw.cacheCreationTokens, sw.cacheReadTokens).
-		WithStreaming(true, timeToFirstToken, completionStartTime).
+	payload := sw.usage.chatRecord(sw.provider, sw.provider.chatRecordModel(sw.model, sw.servedModel)).
+		WithTiming(sw.clock.start, sw.clock.duration()).
+		WithStreaming(true, sw.clock.timeToFirstToken(), sw.clock.firstToken).
 		WithStopReason(stopReason).
 		WithSystemFingerprint(sw.systemFingerprint).
 		Build()
 
-	metering.ApplyMetadata(payload, sw.metadata)
+	applyStreamOutcome(payload, streamErr, sw.metadata, func() metering.ChatCapture { return chatCapture(sw.params, "").WithStreamedReply(sw.reply) })
 	sw.parent.metering.Send(payload)
 
 	return err

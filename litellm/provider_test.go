@@ -108,11 +108,11 @@ func TestProviderRegistry_DeepCopyOfSlices(t *testing.T) {
 
 func TestExtractProvider_LegacyProvidersPreserved(t *testing.T) {
 	tests := map[string]string{
-		"anyscale/mistral-7b":      "Anyscale",
-		"cloudflare/llama-2-7b":    "Cloudflare",
-		"voyage/voyage-2":          "Voyage AI",
-		"friendliai/llama-3-70b":   "FriendliAI",
-		"friendliai/mixtral-8x7b":  "FriendliAI",
+		"anyscale/mistral-7b":     "Anyscale",
+		"cloudflare/llama-2-7b":   "Cloudflare",
+		"voyage/voyage-2":         "Voyage AI",
+		"friendliai/llama-3-70b":  "FriendliAI",
+		"friendliai/mixtral-8x7b": "FriendliAI",
 	}
 	for model, want := range tests {
 		t.Run(model, func(t *testing.T) {

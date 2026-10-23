@@ -3,6 +3,8 @@ package metering
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,11 +88,11 @@ func TestBuffer_Flush_Replays_Successfully(t *testing.T) {
 	assert.Equal(t, int64(2), stats.EventsReplayed)
 }
 
-func TestBuffer_Flush_StopsOnRetryableFailure(t *testing.T) {
+func TestBuffer_Flush_KeepsOnlyTheRecordsThatFailRetryably(t *testing.T) {
 	var received atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count := received.Add(1)
-		if count == 2 {
+		received.Add(1)
+		if r.Header.Get("Idempotency-Key") == "k1" {
 			w.WriteHeader(500)
 			return
 		}
@@ -99,21 +101,45 @@ func TestBuffer_Flush_StopsOnRetryableFailure(t *testing.T) {
 	defer srv.Close()
 
 	buf := newTestBuffer(100)
+	buf.path.monitor.onRecovery = nil
 
 	for i := 0; i < 4; i++ {
+		key := "k" + string(rune('0'+i))
 		buf.Push(BufferedEvent{
 			URL:            srv.URL,
-			Headers:        map[string]string{"Content-Type": "application/json"},
+			Headers:        map[string]string{"Content-Type": "application/json", "Idempotency-Key": key},
 			Body:           []byte(`{}`),
-			IdempotencyKey: "k" + string(rune('0'+i)),
+			IdempotencyKey: key,
 		})
 	}
 
 	buf.flush()
 
 	stats := buf.GetBufferStats()
-	assert.Equal(t, int64(1), stats.EventsReplayed)
-	assert.Equal(t, 3, stats.Size)
+	assert.Equal(t, int64(3), stats.EventsReplayed)
+	assert.Equal(t, 1, stats.Size)
+	buf.mu.Lock()
+	assert.Equal(t, "k1", buf.events[0].IdempotencyKey)
+	buf.mu.Unlock()
+}
+
+func TestBuffer_Flush_SendsOneRecordWhileReveniumIsStillDown(t *testing.T) {
+	var received atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		w.WriteHeader(503)
+	}))
+	defer srv.Close()
+
+	buf := newTestBuffer(100)
+	for i := 0; i < 20; i++ {
+		buf.Push(BufferedEvent{URL: srv.URL, Headers: map[string]string{}, Body: []byte(`{}`)})
+	}
+
+	buf.flush()
+
+	assert.Equal(t, int32(1), received.Load())
+	assert.Equal(t, 20, buf.GetBufferStats().Size)
 }
 
 func TestBuffer_Flush_DiscardsNonRetryable(t *testing.T) {
@@ -346,4 +372,28 @@ func TestBuffer_EmptyFlushIsNoop(t *testing.T) {
 	stats := buf.GetBufferStats()
 	assert.Equal(t, 0, stats.Size)
 	assert.Equal(t, int64(0), stats.EventsReplayed)
+}
+
+func TestBuffer_FullBufferWarnsOncePerEpisodeAndKeepsTheNewestRecords(t *testing.T) {
+	logger := useRecordingLogger(t)
+	buf := newTestBuffer(3)
+	defer buf.Stop()
+
+	for i := 0; i < 50; i++ {
+		buf.Push(makeEvent("k" + strconv.Itoa(i)))
+	}
+
+	stats := buf.GetBufferStats()
+	assert.Equal(t, 3, stats.Size)
+	assert.Equal(t, int64(47), stats.EventsEvicted)
+	buf.mu.Lock()
+	assert.Equal(t, "k47", buf.events[0].IdempotencyKey)
+	buf.mu.Unlock()
+	var fullWarnings int
+	for _, line := range logger.Lines() {
+		if strings.Contains(line, "buffer full") {
+			fullWarnings++
+		}
+	}
+	assert.Equal(t, 1, fullWarnings)
 }

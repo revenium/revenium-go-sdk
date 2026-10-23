@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
 type ReveniumGrok struct {
@@ -20,83 +22,67 @@ type ReveniumGrok struct {
 	mu       sync.RWMutex
 	client   *http.Client
 	metering *metering.MeteringClient
+	enforcer *enforcement.Engine
 }
 
-var (
-	globalClient *ReveniumGrok
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumGrok", func(c *ReveniumGrok) *core.ReveniumConfig { return c.config.Revenium })
 
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
-	core.InitializeLogger()
-	core.Info("Initializing Revenium middleware for xAI Grok...")
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumGrok, error) {
+		return buildSharedClient(cfg)
+	})
+}
+
+func buildSharedClient(cfg *Config) (*ReveniumGrok, error) {
+	core.InitializeLogger()
+	core.Info("Initializing Revenium middleware for xAI Grok...")
 
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	globalClient = &ReveniumGrok{
+	candidate := &ReveniumGrok{
 		config:   cfg,
 		provider: provider,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}
 
-	initialized = true
 	core.Info("Revenium middleware initialized successfully")
-	return nil
+	return candidate, nil
 }
 
 func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
+	return sharedClient.IsInitialized()
 }
 
 func GetClient() (*ReveniumGrok, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
+	return sharedClient.Get()
 }
 
 func NewReveniumGrok(cfg *Config) (*ReveniumGrok, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if cfg.Revenium == nil || cfg.Revenium.APIKey == "" {
 		return nil, core.NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
@@ -104,10 +90,7 @@ func NewReveniumGrok(cfg *Config) (*ReveniumGrok, error) {
 
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +102,7 @@ func NewReveniumGrok(cfg *Config) (*ReveniumGrok, error) {
 			Timeout: 60 * time.Second,
 		},
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
@@ -135,38 +119,43 @@ func (r *ReveniumGrok) GetProvider() Provider {
 }
 
 func (r *ReveniumGrok) ChatCompletions(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	metadata := core.GetUsageMetadata(ctx)
-	startTime := time.Now()
-
-	resp, err := r.callGrokAPI(ctx, req)
-	if err != nil {
-		return nil, err
+	if req.Stream {
+		return nil, ErrStreamingNotSupported
 	}
 
-	duration := time.Since(startTime)
+	metadata := core.GetUsageMetadata(ctx)
+
+	if err := r.enforcer.Check(enforcement.NewEvalContext(ctx, req.Model, ProviderXAI.String()).ServedModelMayBeDated()); err != nil {
+		core.Debug("ChatCompletions blocked by enforcement: %v", err)
+		return nil, err
+	}
 
 	opType := metering.OperationChat
 	if hasVisionContent(req.Messages) {
 		opType = metering.OperationVision
 	}
 
+	startTime := time.Now()
+
+	resp, err := r.callGrokAPI(ctx, req)
+	if err != nil {
+		r.recordFailure(opType, req.Model, startTime, err, metadata)
+		return nil, err
+	}
+
+	duration := time.Since(startTime)
+
 	stopReason := "END"
 	if len(resp.Choices) > 0 && resp.Choices[0].FinishReason != "" {
 		stopReason = mapStopReasonToRevenium(resp.Choices[0].FinishReason)
 	}
 
-	var reasoningTokens, cacheReadTokens int
-	if resp.Usage.CompletionTokensDetails != nil {
-		reasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
-	}
-	if resp.Usage.PromptTokensDetails != nil {
-		cacheReadTokens = resp.Usage.PromptTokensDetails.CachedTokens
-	}
-
-	payload := metering.NewPayload(opType, resp.Model, "xai").
+	usage := resp.Usage
+	payload := metering.NewPayload(opType, meteredModel(resp.Model, req.Model), ProviderXAI.String()).
 		WithTiming(startTime, duration).
-		WithTokens(int64(resp.Usage.PromptTokens), int64(resp.Usage.CompletionTokens), int64(resp.Usage.TotalTokens)).
-		WithReasoningTokens(int64(reasoningTokens), 0, int64(cacheReadTokens)).
+		WithTokens(int64(usage.PromptTokens), usage.billedOutputTokens(), int64(usage.TotalTokens)).
+		WithReasoningTokens(usage.reasoningTokens(), 0, usage.cacheReadTokens()).
+		WithCosts(nil, nil, nil, nil, usage.reportedCostUSD()).
 		WithStopReason(stopReason).
 		WithModelSource("XAI").
 		WithTransactionID(resp.ID).
@@ -178,9 +167,21 @@ func (r *ReveniumGrok) ChatCompletions(ctx context.Context, req ChatCompletionRe
 	}
 
 	metering.ApplyMetadata(payload, metadata)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture {
+		return metering.OpenAIChatCapture(req.Messages, completionReply(resp))
+	})
 	r.metering.Send(payload)
 
 	return resp, nil
+}
+
+func (r *ReveniumGrok) recordFailure(opType metering.OperationType, model string, startTime time.Time, err error, metadata map[string]interface{}) {
+	payload := metering.NewPayload(opType, model, ProviderXAI.String()).
+		WithTiming(startTime, time.Since(startTime)).
+		WithModelSource("XAI").
+		Build()
+	metering.ApplyFailedCall(payload, metering.FailureOf(err), metadata)
+	r.metering.Send(payload)
 }
 
 func (r *ReveniumGrok) callGrokAPI(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
@@ -222,7 +223,7 @@ func (r *ReveniumGrok) callGrokAPI(ctx context.Context, req ChatCompletionReques
 		return nil, core.NewProviderError(
 			fmt.Sprintf("xAI Grok API returned %d: %s", httpResp.StatusCode, string(body)),
 			nil,
-		)
+		).WithProviderAnswer(httpResp.StatusCode, body)
 	}
 
 	var resp ChatCompletionResponse
@@ -240,17 +241,17 @@ func (r *ReveniumGrok) Flush() {
 func (r *ReveniumGrok) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
 func Reset() {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	_ = sharedClient.ResetAndClose()
+}
 
-	if globalClient != nil {
-		globalClient.Close()
-		globalClient = nil
+func completionReply(resp *ChatCompletionResponse) string {
+	if len(resp.Choices) == 0 {
+		return ""
 	}
-
-	initialized = false
+	return prompt.ContentText(resp.Choices[0].Message.Content)
 }

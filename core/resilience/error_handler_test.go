@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/stretchr/testify/assert"
@@ -121,4 +123,26 @@ func TestErrorClassification_String(t *testing.T) {
 	assert.Equal(t, "RETRYABLE", ClassificationRetryable.String())
 	assert.Equal(t, "NON_RETRYABLE", ClassificationNonRetryable.String())
 	assert.Equal(t, "THROTTLED", ClassificationThrottled.String())
+}
+
+func TestClassifyError_CallersExpiredDeadlineDuringARequestIsNotRetried(t *testing.T) {
+	callerDeadline := &url.Error{Op: "Post", URL: "https://bedrock.example/invoke", Err: context.DeadlineExceeded}
+
+	assert.Equal(t, ClassificationNonRetryable, ClassifyError(callerDeadline))
+	assert.Equal(t, ClassificationNonRetryable, ClassifyError(core.NewNetworkError("request failed", callerDeadline)))
+}
+
+func TestWithRetry_ReturnsTheOriginalErrorWhenTheCallersDeadlineExpiresMidRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	callerDeadline := &url.Error{Op: "Post", URL: "https://bedrock.example/invoke", Err: context.DeadlineExceeded}
+	calls := 0
+
+	err := WithRetry(ctx, func() error {
+		calls++
+		return callerDeadline
+	}, &RetryConfig{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond})
+
+	assert.Equal(t, 1, calls)
+	assert.Same(t, callerDeadline, err)
 }

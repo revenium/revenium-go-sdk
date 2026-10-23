@@ -15,8 +15,12 @@ import (
 
 // Stream opens a streaming fal request, returning a channel of events. The channel is closed when the stream ends.
 func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[string]interface{}, metadata map[string]interface{}) (<-chan StreamEvent, error) {
-	contextMeta := core.GetUsageMetadata(ctx)
-	mergedMeta := mergeMetadataMaps(contextMeta, metadata)
+	mergedMeta := core.UsageMetadataOver(ctx, metadata)
+	if err := r.enforcer.Check(evalContext(ctx, mergedMeta, endpointID)); err != nil {
+		core.Debug("Stream blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	startTime := time.Now()
 	enabledSnapshot := r.enabled.Load()
 
@@ -28,6 +32,7 @@ func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[s
 	url := endpointURL(r.streamBaseURL(), endpointID) + "/stream"
 	respBody, _, err := r.falClient.rawStream(ctx, "POST", url, body, nil)
 	if err != nil {
+		r.recordFailure(endpointID, mergedMeta, startTime, true, err)
 		return nil, err
 	}
 
@@ -62,12 +67,15 @@ func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[s
 			if readErr == io.EOF {
 				if enabledSnapshot {
 					duration := time.Since(startTime)
-					r.meterStreamResult(endpointID, finalData, mergedMeta, duration, startTime, input)
+					r.sendResultRecord(endpointID, finalData, mergedMeta, duration, startTime, input)
 				}
 				send(StreamEvent{Data: finalData, Done: true})
 				return
 			}
 			if readErr != nil {
+				if enabledSnapshot {
+					r.sendFailureRecord(endpointID, mergedMeta, startTime, true, streamFailure(ctx, readErr))
+				}
 				send(StreamEvent{Error: readErr, Done: true})
 				return
 			}
@@ -79,7 +87,7 @@ func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[s
 			if data == "[DONE]" {
 				if enabledSnapshot {
 					duration := time.Since(startTime)
-					r.meterStreamResult(endpointID, finalData, mergedMeta, duration, startTime, input)
+					r.sendResultRecord(endpointID, finalData, mergedMeta, duration, startTime, input)
 				}
 				send(StreamEvent{Data: finalData, Done: true})
 				return
@@ -92,6 +100,9 @@ func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[s
 			}
 			finalData = parsed
 			if !send(StreamEvent{Data: parsed, Partial: true}) {
+				if enabledSnapshot {
+					r.sendFailureRecord(endpointID, mergedMeta, startTime, true, ctx.Err())
+				}
 				return
 			}
 		}
@@ -100,13 +111,13 @@ func (r *ReveniumFal) Stream(ctx context.Context, endpointID string, input map[s
 	return events, nil
 }
 
-func (r *ReveniumFal) meterStreamResult(endpointID string, result map[string]interface{}, metadata map[string]interface{}, duration time.Duration, startTime time.Time, input map[string]interface{}) {
-	op := DetectMediaType(endpointID, result)
-	prompt := promptFromInput(input)
-	payload := buildPayloadFromResult(endpointID, op, result, input, metadata, duration, startTime, r.config.CapturePrompts, prompt)
-	if payload != nil {
-		r.metering.Send(payload)
+// streamFailure names why a stream stopped: the caller's ended context
+// closes the body, which surfaces as a read error.
+func streamFailure(ctx context.Context, readErr error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
+	return readErr
 }
 
 func (r *ReveniumFal) streamBaseURL() string {

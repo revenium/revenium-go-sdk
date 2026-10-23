@@ -111,3 +111,15 @@ func TestStreaming_ToolCallAccumulationAcrossChunks(t *testing.T) {
 	assert.Equal(t, "lookup", tc.Function.Name)
 	assert.Equal(t, `{"q":"weather"}`, tc.Function.Arguments)
 }
+
+func TestStreaming_StopReasonIsChoiceZerosWhereverItSits(t *testing.T) {
+	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Paris\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"Lyon\"},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	s := newStreamFromString(body)
+	for s.Next() {
+	}
+
+	require.NoError(t, s.Err())
+	assert.Equal(t, "stop", s.finishReason)
+}

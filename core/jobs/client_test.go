@@ -115,8 +115,10 @@ func TestReportJobOutcomeConflict409WithoutStructuredBody(t *testing.T) {
 		ExecutionStatus: ExecutionStatusSuccess,
 	})
 
-	require.NoError(t, err)
 	assert.Nil(t, result)
+	var conflictErr *OutcomeAlreadyReportedError
+	require.ErrorAs(t, err, &conflictErr)
+	assert.Equal(t, "outcome already reported for job test-job", conflictErr.Message)
 }
 
 func TestReportJobOutcomeNilOutcome(t *testing.T) {

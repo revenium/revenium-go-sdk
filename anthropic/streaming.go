@@ -10,7 +10,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
+	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
 type StreamingWrapper struct {
@@ -21,6 +23,7 @@ type StreamingWrapper struct {
 	startTime      time.Time
 	firstTokenTime *time.Time
 	mu             sync.Mutex
+	closed         bool
 	messagesAPI    *MessagesInterface
 
 	inputTokens          int
@@ -28,12 +31,22 @@ type StreamingWrapper struct {
 	totalTokens          int
 	cacheCreationTokens  int
 	cacheReadTokens      int
+	cacheWrites          cacheWriteSplit
+	passes               []billedPass
 	reasoningTokens      int
 	model                string
 	provider             string
 	stopReason           string
 	accumulatedTextParts []string
 	hasVision            bool
+	// usageReported is set once the provider reports token counts, which
+	// replace the estimate a stream starts with.
+	usageReported bool
+	progress      streamProgress
+
+	current interface{}
+	request anthropic.MessageNewParams
+	reply   *streamedReply
 }
 
 func newStreamingWrapper(stream interface{}, cfg *Config, md map[string]interface{}, m *MessagesInterface, model, provider string, hasVision bool, startTime time.Time) *StreamingWrapper {
@@ -54,60 +67,102 @@ func newStreamingWrapper(stream interface{}, cfg *Config, md map[string]interfac
 	return w
 }
 
+func (sw *StreamingWrapper) captureRequest(params anthropic.MessageNewParams) {
+	sw.request = params
+	if !prompt.ShouldCapturePrompts(sw.metadata) {
+		return
+	}
+	if capturer, ok := sw.stream.(replyCapturer); ok {
+		capturer.captureReply()
+	} else if sw.typedStream != nil {
+		sw.reply = newStreamedReply()
+	}
+}
+
+// Next reads each event exactly once, so usage and the captured reply do not depend on
+// whether, or how often, the caller reads Current.
 func (sw *StreamingWrapper) Next() bool {
 	if sw.typedStream != nil {
-		return sw.typedStream.Next()
+		if !sw.typedStream.Next() {
+			sw.markExhausted()
+			return false
+		}
+		sw.processTypedEvent(sw.typedStream.Current())
+		return true
 	}
-
-	if sw.stream == nil {
+	if !sw.callReflected("Next") {
+		sw.markExhausted()
 		return false
 	}
+	event := sw.reflectedCurrent()
+	sw.setCurrent(event)
+	sw.processReflectEvent(event)
+	return true
+}
 
-	streamVal := reflect.ValueOf(sw.stream)
-	if streamVal.Kind() == reflect.Ptr {
-		nextMethod := streamVal.MethodByName("Next")
-		if nextMethod.IsValid() {
-			result := nextMethod.Call(nil)
-			if len(result) > 0 {
-				if b, ok := result[0].Interface().(bool); ok {
-					return b
-				}
-			}
-		}
-	}
+func (sw *StreamingWrapper) markExhausted() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.progress.exhausted = true
+}
 
-	return false
+func (sw *StreamingWrapper) setCurrent(event interface{}) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.current = event
 }
 
 func (sw *StreamingWrapper) Current() interface{} {
 	if sw.typedStream != nil {
-		event := sw.typedStream.Current()
-		sw.processTypedEvent(event)
-		return event
+		return sw.typedStream.Current()
 	}
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.current
+}
 
-	if sw.stream == nil {
+func (sw *StreamingWrapper) callReflected(name string) bool {
+	method := sw.reflectedMethod(name)
+	if !method.IsValid() {
+		return false
+	}
+	result := method.Call(nil)
+	if len(result) == 0 {
+		return false
+	}
+	advanced, _ := result[0].Interface().(bool)
+	return advanced
+}
+
+func (sw *StreamingWrapper) reflectedCurrent() interface{} {
+	method := sw.reflectedMethod("Current")
+	if !method.IsValid() {
 		return nil
 	}
-
-	streamVal := reflect.ValueOf(sw.stream)
-	if streamVal.Kind() == reflect.Ptr {
-		currentMethod := streamVal.MethodByName("Current")
-		if currentMethod.IsValid() {
-			result := currentMethod.Call(nil)
-			if len(result) > 0 {
-				event := result[0].Interface()
-				sw.processReflectEvent(event)
-				return event
-			}
-		}
+	if result := method.Call(nil); len(result) > 0 {
+		return result[0].Interface()
 	}
 	return nil
+}
+
+func (sw *StreamingWrapper) reflectedMethod(name string) reflect.Value {
+	if sw.stream == nil {
+		return reflect.Value{}
+	}
+	streamVal := reflect.ValueOf(sw.stream)
+	if streamVal.Kind() != reflect.Ptr {
+		return reflect.Value{}
+	}
+	return streamVal.MethodByName(name)
 }
 
 func (sw *StreamingWrapper) processTypedEvent(event anthropic.MessageStreamEventUnion) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
+
+	if sw.reply != nil {
+		sw.reply.observe(event)
+	}
 
 	switch event.Type {
 	case "content_block_delta":
@@ -120,12 +175,15 @@ func (sw *StreamingWrapper) processTypedEvent(event anthropic.MessageStreamEvent
 		}
 
 	case "message_start":
+		sw.usageReported = true
 		startEvent := event.AsMessageStart()
-		if startEvent.Message.Usage.InputTokens > 0 {
-			sw.inputTokens = int(startEvent.Message.Usage.InputTokens)
-			sw.cacheCreationTokens = int(startEvent.Message.Usage.CacheCreationInputTokens)
-			sw.cacheReadTokens = int(startEvent.Message.Usage.CacheReadInputTokens)
-		}
+		sw.inputTokens = int(startEvent.Message.Usage.InputTokens)
+		sw.outputTokens = int(startEvent.Message.Usage.OutputTokens)
+		sw.totalTokens = sw.inputTokens + sw.outputTokens
+		sw.cacheReadTokens = int(startEvent.Message.Usage.CacheReadInputTokens)
+		sw.cacheCreationTokens = int(startEvent.Message.Usage.CacheCreationInputTokens)
+		sw.cacheWrites = cacheWriteSplitOf(startEvent.Message.Usage.CacheCreation)
+		sw.takeBilledPasses(startEvent.Message.Usage.RawJSON())
 		if string(startEvent.Message.Model) != "" {
 			sw.model = string(startEvent.Message.Model)
 		}
@@ -136,7 +194,7 @@ func (sw *StreamingWrapper) processTypedEvent(event anthropic.MessageStreamEvent
 			sw.inputTokens = int(event.Usage.InputTokens)
 		}
 		if event.Usage.CacheCreationInputTokens > 0 {
-			sw.cacheCreationTokens = int(event.Usage.CacheCreationInputTokens)
+			sw.takeCacheWriteTotal(int(event.Usage.CacheCreationInputTokens), event.Usage.RawJSON())
 		}
 		if event.Usage.CacheReadInputTokens > 0 {
 			sw.cacheReadTokens = int(event.Usage.CacheReadInputTokens)
@@ -148,6 +206,23 @@ func (sw *StreamingWrapper) processTypedEvent(event anthropic.MessageStreamEvent
 		if event.Delta.StopReason != "" {
 			sw.stopReason = string(event.Delta.StopReason)
 		}
+		sw.takeBilledPasses(event.Usage.RawJSON())
+
+	case "message_stop":
+		sw.progress.stopEventSeen = true
+	}
+}
+
+func (sw *StreamingWrapper) takeCacheWriteTotal(total int, usageJSON string) {
+	if total != sw.cacheCreationTokens {
+		sw.cacheWrites = cacheWriteSplitInUsage(usageJSON)
+	}
+	sw.cacheCreationTokens = total
+}
+
+func (sw *StreamingWrapper) takeBilledPasses(usageJSON string) {
+	if passes, reported := billedPassesInUsage(usageJSON); reported {
+		sw.passes = passes
 	}
 }
 
@@ -159,6 +234,10 @@ func (sw *StreamingWrapper) processReflectEvent(event interface{}) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if isEventOfType(event, "message_stop") {
+		sw.progress.stopEventSeen = true
+	}
+
 	if isContentEvent(event) {
 		if sw.firstTokenTime == nil {
 			now := time.Now()
@@ -169,9 +248,10 @@ func (sw *StreamingWrapper) processReflectEvent(event interface{}) {
 		}
 	}
 
-	if isMessageDeltaEvent(event) {
+	if isEventOfType(event, "message_delta") {
 		usage := extractUsageFromEvent(event)
 		if usage != nil {
+			sw.usageReported = true
 			sw.inputTokens = int(usage.InputTokens)
 			sw.outputTokens = int(usage.OutputTokens)
 			sw.totalTokens = sw.inputTokens + sw.outputTokens
@@ -184,6 +264,7 @@ func (sw *StreamingWrapper) processReflectEvent(event interface{}) {
 			if usage.OutputTokensDetails.ThinkingTokens > 0 {
 				sw.reasoningTokens = int(usage.OutputTokensDetails.ThinkingTokens)
 			}
+			sw.takeBilledPasses(usage.RawJSON())
 		}
 
 		stopReasonStr := extractStopReasonFromEvent(event)
@@ -240,6 +321,11 @@ func (sw *StreamingWrapper) Close() error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if sw.closed {
+		return nil
+	}
+	sw.closed = true
+
 	var err error
 	if sw.typedStream != nil {
 		err = sw.typedStream.Close()
@@ -261,6 +347,7 @@ func (sw *StreamingWrapper) Close() error {
 	if acc, ok := sw.stream.(StreamTokenAccumulator); ok {
 		input, output, total := acc.GetAccumulatedTokens()
 		if input > 0 || output > 0 {
+			sw.usageReported = true
 			sw.inputTokens = int(input)
 			sw.outputTokens = int(output)
 			sw.totalTokens = int(total)
@@ -276,6 +363,19 @@ func (sw *StreamingWrapper) Close() error {
 			sw.stopReason = sr
 		}
 	}
+	if reporter, ok := sw.stream.(stopEventReporter); ok && reporter.reachedStopEvent() {
+		sw.progress.stopEventSeen = true
+	}
+	if reporter, ok := sw.stream.(cacheWriteSplitReporter); ok {
+		if split := reporter.reportedCacheWriteSplit(); split.isReported() {
+			sw.cacheWrites = split
+		}
+	}
+	if reporter, ok := sw.stream.(billedPassReporter); ok {
+		if passes := reporter.reportedBilledPasses(); passes != nil {
+			sw.passes = passes
+		}
+	}
 
 	duration := time.Since(sw.startTime)
 	timeToFirstToken := int64(0)
@@ -287,15 +387,24 @@ func (sw *StreamingWrapper) Close() error {
 
 	normalizedProvider := NormalizeProviderName(sw.provider)
 
+	streamErr := sw.Err()
+	if streamErr != nil && !sw.usageReported {
+		sw.inputTokens, sw.totalTokens = 0, sw.outputTokens
+	}
+
 	stopReason := "END"
 	if sw.stopReason != "" {
 		stopReason = MapStopReasonToRevenium(sw.stopReason)
+	}
+	if sw.progress.abandonedBeforeStop() {
+		stopReason = string(core.StopReasonCancelled)
 	}
 
 	payload := metering.NewPayload(metering.OperationChat, sw.model, normalizedProvider).
 		WithTiming(sw.startTime, duration).
 		WithTokens(int64(sw.inputTokens), int64(sw.outputTokens), int64(sw.totalTokens)).
 		WithReasoningTokens(int64(sw.reasoningTokens), int64(sw.cacheCreationTokens), int64(sw.cacheReadTokens)).
+		WithCacheCreationByTTL(sw.cacheWrites.fiveMinute, sw.cacheWrites.oneHour).
 		WithStreaming(true, timeToFirstToken, completionStartTime).
 		WithStopReason(stopReason).
 		Build()
@@ -304,8 +413,19 @@ func (sw *StreamingWrapper) Close() error {
 		payload.Attributes = map[string]interface{}{"hasVision": true}
 	}
 
+	if streamErr != nil {
+		metering.ApplyFailedCall(payload, callFailure(streamErr), sw.metadata)
+		sendTurnRecords(sw.messagesAPI.parent.metering, payload, sw.passes, "")
+		return err
+	}
+
 	metering.ApplyMetadata(payload, sw.metadata)
-	sw.messagesAPI.parent.metering.Send(payload)
+	metering.ApplyChatCapture(payload, sw.metadata, func() metering.ChatCapture {
+		capture := messageCapture(sw.request, "")
+		capture.Output, capture.OutputCut = sw.capturedReply()
+		return capture
+	})
+	sendTurnRecords(sw.messagesAPI.parent.metering, payload, sw.passes, "")
 
 	return err
 }
@@ -398,7 +518,7 @@ func extractTextFromContentEvent(event interface{}) string {
 	return ""
 }
 
-func isMessageDeltaEvent(event interface{}) bool {
+func isEventOfType(event interface{}, eventType string) bool {
 	if event == nil {
 		return false
 	}
@@ -407,13 +527,12 @@ func isMessageDeltaEvent(event interface{}) bool {
 	if eventValue.Kind() == reflect.Ptr {
 		eventValue = eventValue.Elem()
 	}
-
-	typeField := eventValue.FieldByName("Type")
-	if typeField.IsValid() && typeField.Kind() == reflect.String && typeField.String() == "message_delta" {
-		return true
+	if eventValue.Kind() != reflect.Struct {
+		return false
 	}
 
-	return false
+	typeField := eventValue.FieldByName("Type")
+	return typeField.IsValid() && typeField.Kind() == reflect.String && typeField.String() == eventType
 }
 
 func extractUsageFromEvent(event interface{}) *anthropic.MessageDeltaUsage {
@@ -474,4 +593,14 @@ func estimateInputTokens(params anthropic.MessageNewParams) int {
 	}
 
 	return estimatedTokens
+}
+
+func (sw *StreamingWrapper) capturedReply() (text string, cut bool) {
+	if capturer, ok := sw.stream.(replyCapturer); ok {
+		return capturer.capturedReply()
+	}
+	if sw.reply != nil {
+		return sw.reply.text()
+	}
+	return "", true
 }

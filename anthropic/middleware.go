@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,7 +11,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 	"github.com/revenium/revenium-go-sdk/core/resilience"
 )
 
@@ -20,13 +23,10 @@ type ReveniumAnthropic struct {
 	provider Provider
 	mu       sync.RWMutex
 	metering *metering.MeteringClient
+	enforcer *enforcement.Engine
 }
 
-var (
-	globalClient *ReveniumAnthropic
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumAnthropic", func(c *ReveniumAnthropic) *core.ReveniumConfig { return c.config.Revenium })
 
 type AnthropicStatus struct {
 	Initialized         bool
@@ -35,27 +35,31 @@ type AnthropicStatus struct {
 	CircuitBreakerState string
 }
 
+// Initialize sets up the shared client for one Revenium account. A repeat
+// call, including one made while the first setup is still running, returns
+// nil when it names the same Revenium key, base URL and team, or none of
+// them, and a config error otherwise; use NewReveniumAnthropic for several
+// accounts in one process.
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
-	core.InitializeLogger()
-	core.Info("Initializing Revenium middleware...")
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumAnthropic, error) {
+		return buildSharedClient(cfg)
+	})
+}
+
+func buildSharedClient(cfg *Config) (*ReveniumAnthropic, error) {
+	core.InitializeLogger()
+	core.Info("Initializing Revenium middleware...")
+
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	clientOpts := []option.RequestOption{}
@@ -66,47 +70,36 @@ func Initialize(opts ...Option) error {
 	anthropicClient := anthropic.NewClient(clientOpts...)
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	globalClient = &ReveniumAnthropic{
+	candidate := &ReveniumAnthropic{
 		client:   anthropicClient,
 		config:   cfg,
 		provider: provider,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}
 
-	initialized = true
 	core.Info("Revenium middleware initialized successfully")
-	return nil
+	return candidate, nil
 }
 
 func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
+	return sharedClient.IsInitialized()
 }
 
 func GetClient() (*ReveniumAnthropic, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
+	return sharedClient.Get()
 }
 
 func NewReveniumAnthropic(cfg *Config) (*ReveniumAnthropic, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if cfg.Revenium == nil || cfg.Revenium.APIKey == "" {
 		return nil, core.NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
@@ -120,10 +113,7 @@ func NewReveniumAnthropic(cfg *Config) (*ReveniumAnthropic, error) {
 	anthropicClient := anthropic.NewClient(clientOpts...)
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +123,7 @@ func NewReveniumAnthropic(cfg *Config) (*ReveniumAnthropic, error) {
 		config:   cfg,
 		provider: provider,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
@@ -148,6 +139,8 @@ func (r *ReveniumAnthropic) GetProvider() Provider {
 	return r.provider
 }
 
+// GetAnthropicClient returns the provider's own client. Calls made through it
+// are neither recorded nor checked against cost controls.
 func (r *ReveniumAnthropic) GetAnthropicClient() anthropic.Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -158,13 +151,11 @@ func (r *ReveniumAnthropic) GetStatus() AnthropicStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	cb := resilience.GetGlobalCircuitBreaker()
-
 	return AnthropicStatus{
 		Initialized:         IsInitialized(),
 		HasConfig:           r.config != nil,
 		Provider:            string(r.provider),
-		CircuitBreakerState: cb.GetState().String(),
+		CircuitBreakerState: r.metering.CircuitBreakerState().String(),
 	}
 }
 
@@ -187,6 +178,7 @@ func (r *ReveniumAnthropic) Flush() {
 func (r *ReveniumAnthropic) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
@@ -223,31 +215,6 @@ func (m *MessagesInterface) CreateMessageStream(ctx context.Context, params anth
 	}
 }
 
-func (m *MessagesInterface) buildAnthropicPayload(resp *anthropic.Message, md map[string]interface{}, duration time.Duration, provider string, startTime time.Time, hasVision bool) *metering.MeteringPayload {
-	normalizedProvider := NormalizeProviderName(provider)
-
-	stopReason := "END"
-	if resp.StopReason != "" {
-		stopReason = MapStopReasonToRevenium(string(resp.StopReason))
-	}
-
-	totalTokens := resp.Usage.InputTokens + resp.Usage.OutputTokens
-
-	payload := metering.NewPayload(metering.OperationChat, string(resp.Model), normalizedProvider).
-		WithTiming(startTime, duration).
-		WithTokens(resp.Usage.InputTokens, resp.Usage.OutputTokens, totalTokens).
-		WithReasoningTokens(resp.Usage.OutputTokensDetails.ThinkingTokens, resp.Usage.CacheCreationInputTokens, resp.Usage.CacheReadInputTokens).
-		WithStopReason(stopReason).
-		Build()
-
-	if hasVision {
-		payload.Attributes = map[string]interface{}{"hasVision": true}
-	}
-
-	metering.ApplyMetadata(payload, md)
-	return payload
-}
-
 func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (*anthropic.Message, error) {
 	startTime := time.Now()
 
@@ -261,27 +228,39 @@ func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params a
 		params.Model = anthropic.Model(convertedModel)
 	}
 
+	if err := m.parent.enforcer.Check(enforcement.NewEvalContext(ctx, string(params.Model), NormalizeProviderName("Anthropic")).ServedModelMayBeDated()); err != nil {
+		core.Debug("createMessageAnthropic blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	hasVision := DetectVisionContent(params.Messages)
 
 	resp, err := m.client.Messages.New(ctx, params)
 	if err != nil {
+		sendFailedCall(m.parent.metering, string(params.Model), "Anthropic", startTime, hasVision, metadata, err)
 		return nil, err
 	}
 
-	duration := time.Since(startTime)
-	payload := m.buildAnthropicPayload(resp, metadata, duration, "Anthropic", startTime, hasVision)
-	m.parent.metering.Send(payload)
+	turn := messageTurnUsage(resp)
+	payload := buildTurnPayload(turn, turnTiming{start: startTime, duration: time.Since(startTime)}, "Anthropic", hasVision, metadata)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture { return messageCapture(params, messageReply(resp.Content)) })
+	sendTurnRecords(m.parent.metering, payload, turn.passes, "")
 
 	return resp, nil
 }
 
 func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (*anthropic.Message, error) {
 	startTime := time.Now()
+	recordedModel := m.recordedBedrockModelFor(params)
+
+	if err := m.parent.enforcer.Check(enforcement.NewEvalContext(ctx, recordedModel, NormalizeProviderName("AWS"))); err != nil {
+		core.Debug("createMessageBedrock blocked by enforcement: %v", err)
+		return nil, err
+	}
 
 	bedrockAdapter, err := NewBedrockAdapter(m.config)
 	if err != nil {
-		core.Warn("Failed to create Bedrock adapter, falling back to Anthropic: %v", err)
-		return m.bedrockFallback(ctx, params, metadata)
+		return m.bedrockFailed(ctx, params, metadata, nil, err)
 	}
 
 	hasVision := DetectVisionContent(params.Messages)
@@ -299,13 +278,14 @@ func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params ant
 	}, nil)
 
 	if err != nil {
-		core.Warn("Bedrock request failed after retries: %v, falling back to Anthropic", err)
-		return m.bedrockFallback(ctx, params, metadata)
+		return m.bedrockFailed(ctx, params, metadata, &bedrockCall{model: recordedModel, start: startTime, hasVision: hasVision}, err)
 	}
 
-	duration := time.Since(startTime)
-	payload := m.buildAnthropicPayload(resp, metadata, duration, "AWS", startTime, hasVision)
-	m.parent.metering.Send(payload)
+	turn := messageTurnUsage(resp)
+	turn.model = recordedModel
+	payload := buildTurnPayload(turn, turnTiming{start: startTime, duration: time.Since(startTime)}, "AWS", hasVision, metadata)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture { return messageCapture(params, messageReply(resp.Content)) })
+	sendTurnRecords(m.parent.metering, payload, turn.passes, "")
 
 	return resp, nil
 }
@@ -321,12 +301,18 @@ func (m *MessagesInterface) createMessageStreamAnthropic(ctx context.Context, pa
 		params.Model = anthropic.Model(convertedModel)
 	}
 
+	if err := m.parent.enforcer.Check(enforcement.NewEvalContext(ctx, string(params.Model), NormalizeProviderName("Anthropic")).ServedModelMayBeDated()); err != nil {
+		core.Debug("createMessageStreamAnthropic blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	hasVision := DetectVisionContent(params.Messages)
 	startTime := time.Now()
 	stream := m.client.Messages.NewStreaming(ctx, params)
 
 	streamMetadata := buildStreamMetadata(metadata, string(params.Model))
 	wrapper := newStreamingWrapper(stream, m.config, streamMetadata, m, string(params.Model), "Anthropic", hasVision, startTime)
+	wrapper.captureRequest(params)
 
 	inputTokens := estimateInputTokens(params)
 	wrapper.SetInputTokens(inputTokens)
@@ -335,10 +321,15 @@ func (m *MessagesInterface) createMessageStreamAnthropic(ctx context.Context, pa
 }
 
 func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (interface{}, error) {
+	recordedModel := m.recordedBedrockModelFor(params)
+	if err := m.parent.enforcer.Check(enforcement.NewEvalContext(ctx, recordedModel, NormalizeProviderName("AWS"))); err != nil {
+		core.Debug("createMessageStreamBedrock blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	bedrockAdapter, err := NewBedrockAdapter(m.config)
 	if err != nil {
-		core.Warn("Failed to create Bedrock adapter for streaming, falling back to Anthropic: %v", err)
-		return m.bedrockStreamingFallback(ctx, params, metadata)
+		return m.bedrockStreamFailed(ctx, params, metadata, nil, err)
 	}
 
 	hasVision := DetectVisionContent(params.Messages)
@@ -357,12 +348,12 @@ func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, para
 	}, nil)
 
 	if err != nil {
-		core.Warn("Bedrock streaming failed after retries: %v, falling back to Anthropic", err)
-		return m.bedrockStreamingFallback(ctx, params, metadata)
+		return m.bedrockStreamFailed(ctx, params, metadata, &bedrockCall{model: recordedModel, start: startTime, hasVision: hasVision, streamed: true}, err)
 	}
 
-	streamMetadata := buildStreamMetadata(metadata, string(params.Model))
-	wrapper := newStreamingWrapper(stream, m.config, streamMetadata, m, string(params.Model), "AWS", hasVision, startTime)
+	streamMetadata := buildStreamMetadata(metadata, recordedModel)
+	wrapper := newStreamingWrapper(stream, m.config, streamMetadata, m, recordedModel, "AWS", hasVision, startTime)
+	wrapper.captureRequest(params)
 
 	inputTokens := estimateInputTokens(params)
 	wrapper.SetInputTokens(inputTokens)
@@ -370,11 +361,69 @@ func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, para
 	return wrapper, nil
 }
 
+// bedrockCall is what the record of a failed Bedrock call needs; it is nil
+// when the SDK could not set the call up. A call re-sent to the Anthropic API
+// is recorded by that attempt instead.
+type bedrockCall struct {
+	model     string
+	start     time.Time
+	hasVision bool
+	streamed  bool
+}
+
+// recordBedrockFailure skips a request the SDK refused to send.
+func (m *MessagesInterface) recordBedrockFailure(call *bedrockCall, metadata map[string]interface{}, err error) {
+	if call == nil || errors.Is(err, ErrBedrockCannotCarry) {
+		return
+	}
+	timing := turnTiming{start: call.start, duration: time.Since(call.start), streamed: call.streamed}
+	m.parent.metering.Send(buildFailedTurnPayload(turnUsage{model: call.model}, timing, "AWS", call.hasVision, metadata, err))
+}
+
+func (m *MessagesInterface) bedrockFailed(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}, call *bedrockCall, err error) (*anthropic.Message, error) {
+	if !m.config.BedrockFallbackToAnthropic {
+		m.recordBedrockFailure(call, metadata, err)
+		return nil, err
+	}
+	core.Warn("Bedrock request failed: %s, falling back to Anthropic", prompt.RedactedError(err))
+	resp, fallbackErr := m.bedrockFallback(ctx, params, metadata)
+	if fallbackNotSent(fallbackErr) {
+		m.recordBedrockFailure(call, metadata, err)
+	}
+	return resp, fallbackErr
+}
+
+func (m *MessagesInterface) bedrockStreamFailed(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}, call *bedrockCall, err error) (interface{}, error) {
+	if !m.config.BedrockFallbackToAnthropic {
+		m.recordBedrockFailure(call, metadata, err)
+		return nil, err
+	}
+	core.Warn("Bedrock streaming request failed: %s, falling back to Anthropic", prompt.RedactedError(err))
+	stream, fallbackErr := m.bedrockStreamingFallback(ctx, params, metadata)
+	if fallbackNotSent(fallbackErr) {
+		m.recordBedrockFailure(call, metadata, err)
+	}
+	return stream, fallbackErr
+}
+
+// errFallbackModel marks a Bedrock model id the fallback could not convert,
+// so no Anthropic request was sent.
+var errFallbackModel = errors.New("no Anthropic model for this Bedrock model")
+
+// fallbackNotSent reports whether the fallback to the Anthropic API ended
+// before sending its request, leaving the failed Bedrock call as the only
+// one to record: the model could not be converted, or a cost control
+// blocked the request.
+func fallbackNotSent(err error) bool {
+	var blocked *enforcement.ErrCostLimitExceeded
+	return errors.Is(err, errFallbackModel) || errors.As(err, &blocked)
+}
+
 func (m *MessagesInterface) bedrockFallback(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (*anthropic.Message, error) {
 	fallbackParams := params
 	convertedModel, err := ConvertBedrockARNToAnthropicModel(string(params.Model))
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert Bedrock model for fallback: %w", err)
+		return nil, fmt.Errorf("failed to convert Bedrock model for fallback: %w: %w", errFallbackModel, err)
 	}
 	fallbackParams.Model = anthropic.Model(convertedModel)
 	core.Info("Converted Bedrock model '%s' to Anthropic model '%s' for fallback", params.Model, convertedModel)
@@ -385,7 +434,7 @@ func (m *MessagesInterface) bedrockStreamingFallback(ctx context.Context, params
 	fallbackParams := params
 	convertedModel, err := ConvertBedrockARNToAnthropicModel(string(params.Model))
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert Bedrock model for streaming fallback: %w", err)
+		return nil, fmt.Errorf("failed to convert Bedrock model for streaming fallback: %w: %w", errFallbackModel, err)
 	}
 	fallbackParams.Model = anthropic.Model(convertedModel)
 	core.Info("Converted Bedrock model '%s' to Anthropic model '%s' for streaming fallback", params.Model, convertedModel)
@@ -404,13 +453,5 @@ func buildStreamMetadata(metadata map[string]interface{}, model string) map[stri
 }
 
 func Reset() {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if globalClient != nil {
-		globalClient.Close()
-		globalClient = nil
-	}
-
-	initialized = false
+	_ = sharedClient.ResetAndClose()
 }

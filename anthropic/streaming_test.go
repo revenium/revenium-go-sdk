@@ -57,7 +57,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 		messagesAPI:          &MessagesInterface{parent: r},
 		model:                "claude-haiku-4-5",
 		provider:             "anthropic",
-		stopReason:           "end_turn",
+		stopReason:           "max_tokens",
 		inputTokens:          120,
 		outputTokens:         45,
 		totalTokens:          165,
@@ -66,6 +66,7 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 		reasoningTokens:      7,
 		hasVision:            true,
 		accumulatedTextParts: []string{"hello", " world"},
+		progress:             streamProgress{stopEventSeen: true},
 	}
 
 	require.NoError(t, w.Close())
@@ -82,7 +83,9 @@ func TestStreamingWrapper_CloseSendsMeteringPayload(t *testing.T) {
 	assert.Equal(t, float64(45), p["outputTokenCount"])
 	assert.Equal(t, float64(165), p["totalTokenCount"])
 	assert.Equal(t, float64(7), p["reasoningTokenCount"])
-	assert.Equal(t, "END", p["stopReason"])
+	assert.Equal(t, float64(3), p["cacheCreationTokenCount"])
+	assert.Equal(t, float64(2), p["cacheReadTokenCount"])
+	assert.Equal(t, "TOKEN_LIMIT", p["stopReason"])
 	assert.Equal(t, "trace-x", p["traceId"])
 	attrs, _ := p["attributes"].(map[string]interface{})
 	require.NotNil(t, attrs)
@@ -141,13 +144,7 @@ func TestStreamingWrapper_MessageDeltaWithoutThinkingKeepsCapturedValue(t *testi
 	assert.Equal(t, 30, w.reasoningTokens)
 }
 
-func TestBuildAnthropicPayload_ForwardsThinkingTokens(t *testing.T) {
-	mock := testutil.NewMockMeteringServer()
-	defer mock.Close()
-	r := newTestAnthropic(t, mock.URL())
-	defer r.Close()
-
-	m := &MessagesInterface{parent: r}
+func TestMessagePayload_ForwardsThinkingTokens(t *testing.T) {
 	resp := &anthropicsdk.Message{
 		Model:      "claude-sonnet-4-5",
 		StopReason: "end_turn",
@@ -158,7 +155,7 @@ func TestBuildAnthropicPayload_ForwardsThinkingTokens(t *testing.T) {
 		},
 	}
 
-	payload := m.buildAnthropicPayload(resp, nil, time.Second, "anthropic", time.Now(), false)
+	payload := messagePayload(resp, "anthropic")
 
 	assert.Equal(t, int64(40), payload.ReasoningTokenCount)
 	assert.Equal(t, int64(150), payload.TotalTokenCount)

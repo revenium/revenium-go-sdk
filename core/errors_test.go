@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -220,4 +221,30 @@ func TestIsErrorType(t *testing.T) {
 		assert.True(t, IsInternalError(internalErr))
 		assert.False(t, IsInternalError(configErr))
 	})
+}
+
+func TestIsClientRefusal_OnlyA4xxAnswerIsARefusal(t *testing.T) {
+	answered := func(status int) error {
+		return NewProviderError("provider answered", nil).WithProviderAnswer(status, []byte(`{}`))
+	}
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"400":                       {answered(400), true},
+		"429":                       {answered(429), true},
+		"499":                       {answered(499), true},
+		"wrapped 422":               {fmt.Errorf("create task: %w", answered(422)), true},
+		"500":                       {answered(500), false},
+		"504 gateway timeout":       {answered(504), false},
+		"399":                       {answered(399), false},
+		"Revenium error, no status": {NewNetworkError("connection lost", nil), false},
+		"plain error":               {errors.New("boom"), false},
+		"nil":                       {nil, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsClientRefusal(tc.err))
+		})
+	}
 }

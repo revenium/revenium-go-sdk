@@ -10,7 +10,7 @@ import (
 	"google.golang.org/genai"
 )
 
-const defaultVideoPollInterval = 5 * time.Second
+var videoPollInterval = 5 * time.Second
 
 func (m *ModelsInterface) GenerateVideo(
 	ctx context.Context,
@@ -19,27 +19,16 @@ func (m *ModelsInterface) GenerateVideo(
 	image *genai.Image,
 	config *genai.GenerateVideosConfig,
 ) (*genai.GenerateVideosOperation, error) {
-	metadata := core.GetUsageMetadata(ctx)
-
 	core.Debug("GenerateVideo called with model: %s", model)
 
-	requestTime := time.Now()
-
-	op, err := m.client.Models.GenerateVideos(ctx, model, prompt, image, config)
-
-	if err != nil {
-		core.Debug("GenerateVideo error: %v", err)
-		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
-			WithTiming(requestTime, time.Since(requestTime)).
-			WithOperationSubtype(metering.SubtypeGeneration).
-			WithError(err.Error()).
-			Build()
-		metering.ApplyMetadata(payload, metadata)
-		m.parent.metering.Send(payload)
+	if err := m.checkCostControls(ctx, model); err != nil {
 		return nil, err
 	}
 
-	return op, nil
+	request := newVideoRequest(ctx, model, metering.SubtypeGeneration, config)
+	ctx, sending := watchSending(ctx)
+	op, err := m.client.Models.GenerateVideos(ctx, model, prompt, image, config)
+	return m.trackSubmittedVideo(request, sending, op, err)
 }
 
 func (m *ModelsInterface) GenerateVideoFromSource(
@@ -48,29 +37,44 @@ func (m *ModelsInterface) GenerateVideoFromSource(
 	source *genai.GenerateVideosSource,
 	config *genai.GenerateVideosConfig,
 ) (*genai.GenerateVideosOperation, error) {
-	metadata := core.GetUsageMetadata(ctx)
-
 	core.Debug("GenerateVideoFromSource called with model: %s", model)
 
-	requestTime := time.Now()
-
-	op, err := m.client.Models.GenerateVideosFromSource(ctx, model, source, config)
-
-	if err != nil {
-		core.Debug("GenerateVideoFromSource error: %v", err)
-		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
-			WithTiming(requestTime, time.Since(requestTime)).
-			WithOperationSubtype(metering.SubtypeGeneration).
-			WithError(err.Error()).
-			Build()
-		metering.ApplyMetadata(payload, metadata)
-		m.parent.metering.Send(payload)
+	if err := m.checkCostControls(ctx, model); err != nil {
 		return nil, err
 	}
 
+	request := newVideoRequest(ctx, model, metering.SubtypeGeneration, config)
+	ctx, sending := watchSending(ctx)
+	op, err := m.client.Models.GenerateVideosFromSource(ctx, model, source, config)
+	return m.trackSubmittedVideo(request, sending, op, err)
+}
+
+func (m *ModelsInterface) trackSubmittedVideo(
+	request videoRequest,
+	sending *sentRequest,
+	op *genai.GenerateVideosOperation,
+	err error,
+) (*genai.GenerateVideosOperation, error) {
+	videos := m.parent.videos
+	if err != nil {
+		core.Debug("Video submission error: %v", err)
+		if !sending.left() {
+			return nil, err
+		}
+		failure := callFailure(err)
+		videos.report("", request, videoResult{failure: &failure})
+		return nil, err
+	}
+	if op != nil {
+		videos.track(op.Name, request)
+		videos.settleOperation(op)
+	}
 	return op, nil
 }
 
+// WaitForVideo polls until the operation finishes. The usage record is sent once per
+// operation when its outcome is first seen, so polling with
+// Operations.GetVideosOperation instead records the same video exactly once.
 func (m *ModelsInterface) WaitForVideo(
 	ctx context.Context,
 	model string,
@@ -78,54 +82,17 @@ func (m *ModelsInterface) WaitForVideo(
 	operationSubtype string,
 	config *genai.GenerateVideosConfig,
 ) (*genai.GenerateVideosOperation, error) {
-	metadata := core.GetUsageMetadata(ctx)
-
 	core.Debug("WaitForVideo polling for operation: %s", operation.Name)
 
-	requestTime := time.Now()
+	videos := m.parent.videos
+	videos.trackWait(operation.Name, newVideoRequest(ctx, model, operationSubtype, config))
 
 	result, err := m.pollVideoOperation(ctx, operation)
-
-	duration := time.Since(requestTime)
-
+	videos.settleOperation(result)
 	if err != nil {
 		core.Debug("WaitForVideo error: %v", err)
-		payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
-			WithTiming(requestTime, duration).
-			WithOperationSubtype(operationSubtype).
-			WithError(err.Error()).
-			Build()
-		metering.ApplyMetadata(payload, metadata)
-		m.parent.metering.Send(payload)
 		return nil, err
 	}
-
-	attrs := map[string]interface{}{}
-
-	var requestedDuration float64
-	if config != nil {
-		if config.DurationSeconds != nil {
-			requestedDuration = float64(*config.DurationSeconds)
-		}
-		if config.AspectRatio != "" {
-			attrs["resolution"] = mapAspectRatioToResolution(config.AspectRatio)
-		}
-	}
-	if result.Response != nil {
-		attrs["videoCount"] = len(result.Response.GeneratedVideos)
-	}
-
-	core.Debug("WaitForVideo completed in %v", duration)
-
-	payload := metering.NewPayload(metering.OperationVideo, model, m.provider.String()).
-		WithTiming(requestTime, duration).
-		WithVideoDuration(0, requestedDuration).
-		WithOperationSubtype(operationSubtype).
-		WithAttributes(attrs).
-		Build()
-	metering.ApplyMetadata(payload, metadata)
-	m.parent.metering.Send(payload)
-
 	return result, nil
 }
 
@@ -133,13 +100,13 @@ func (m *ModelsInterface) pollVideoOperation(
 	ctx context.Context,
 	operation *genai.GenerateVideosOperation,
 ) (*genai.GenerateVideosOperation, error) {
-	ticker := time.NewTicker(defaultVideoPollInterval)
+	ticker := time.NewTicker(videoPollInterval)
 	defer ticker.Stop()
 
 	for {
 		if operation.Done {
 			if operation.Error != nil {
-				return operation, fmt.Errorf("video generation failed: %v", operation.Error)
+				return operation, videoFailure(operation.Error).Err
 			}
 			return operation, nil
 		}

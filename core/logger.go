@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,52 +45,54 @@ type Logger interface {
 	GetLevel() LogLevel
 }
 
-// DefaultLogger is the default console logger implementation
+// DefaultLogger is the default console logger implementation. The level is
+// atomic because every provider's Initialize sets it while other goroutines
+// may be logging.
 type DefaultLogger struct {
-	level LogLevel
+	level atomic.Int32
 }
 
 // NewDefaultLogger creates a new default logger
 func NewDefaultLogger() *DefaultLogger {
-	return &DefaultLogger{
-		level: LogLevelInfo,
-	}
+	l := &DefaultLogger{}
+	l.level.Store(int32(LogLevelInfo))
+	return l
 }
 
 // SetLevel sets the logging level
 func (l *DefaultLogger) SetLevel(level LogLevel) {
-	l.level = level
+	l.level.Store(int32(level))
 }
 
 // GetLevel returns the current logging level
 func (l *DefaultLogger) GetLevel() LogLevel {
-	return l.level
+	return LogLevel(l.level.Load())
 }
 
 // Debug logs a debug message
 func (l *DefaultLogger) Debug(message string, args ...interface{}) {
-	if l.level <= LogLevelDebug {
+	if l.GetLevel() <= LogLevelDebug {
 		l.log("DEBUG", message, args...)
 	}
 }
 
 // Info logs an info message
 func (l *DefaultLogger) Info(message string, args ...interface{}) {
-	if l.level <= LogLevelInfo {
+	if l.GetLevel() <= LogLevelInfo {
 		l.log("INFO", message, args...)
 	}
 }
 
 // Warn logs a warning message
 func (l *DefaultLogger) Warn(message string, args ...interface{}) {
-	if l.level <= LogLevelWarn {
+	if l.GetLevel() <= LogLevelWarn {
 		l.log("WARN", message, args...)
 	}
 }
 
 // Error logs an error message
 func (l *DefaultLogger) Error(message string, args ...interface{}) {
-	if l.level <= LogLevelError {
+	if l.GetLevel() <= LogLevelError {
 		l.log("ERROR", message, args...)
 	}
 }
@@ -119,13 +122,20 @@ func SetLogger(logger Logger) {
 	globalLogger = logger
 }
 
-// InitializeLogger initializes the logger from environment variables
+// debugRequested remembers the last SetGlobalDebug, so a later
+// InitializeLogger does not lower the level debug asked for.
+var debugRequested atomic.Bool
+
+// InitializeLogger sets the log level from REVENIUM_LOG_LEVEL, or to debug
+// while debug is turned on through SetGlobalDebug.
 func InitializeLogger() {
-	logLevelStr := strings.ToUpper(os.Getenv("REVENIUM_LOG_LEVEL"))
-	level := ParseLogLevel(logLevelStr)
+	level := ParseLogLevel(os.Getenv(EnvLogLevel))
+	if debugRequested.Load() {
+		level = LogLevelDebug
+	}
 	globalLogger.SetLevel(level)
 
-	if os.Getenv("REVENIUM_VERBOSE_STARTUP") == "true" || os.Getenv("REVENIUM_VERBOSE_STARTUP") == "1" {
+	if IsEnvFlagSet(EnvVerboseStartup) {
 		globalLogger.Info("Logger initialized with level: %s", level.String())
 	}
 }
@@ -133,8 +143,20 @@ func InitializeLogger() {
 // SetGlobalDebug enables or disables debug logging globally.
 // This provides backward compatibility with providers that use a boolean debug flag.
 func SetGlobalDebug(enabled bool) {
+	debugRequested.Store(enabled)
 	if enabled {
 		globalLogger.SetLevel(LogLevelDebug)
+	}
+}
+
+// EnableDebugWhenRequested turns debug logging on when debug is true and
+// otherwise leaves the level alone, so a client built without debug never
+// silences one built with it. REVENIUM_DEBUG reaches it only through
+// ReveniumConfig.DebugRequested, the single place that reads the variable
+// (CFG-007), so Initialize and the standalone constructors agree.
+func EnableDebugWhenRequested(debug bool) {
+	if debug {
+		SetGlobalDebug(true)
 	}
 }
 

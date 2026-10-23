@@ -66,7 +66,6 @@ func (c *Config) loadFromEnv() error {
 
 	c.Revenium = core.MergeReveniumConfig(c.Revenium, core.LoadReveniumConfig())
 
-	core.SetGlobalDebug(c.Revenium.Debug)
 	core.Debug("Loading configuration from environment variables")
 
 	return nil

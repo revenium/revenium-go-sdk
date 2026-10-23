@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"errors"
 	"sync"
 )
 
@@ -53,16 +54,15 @@ func (cm *ClientManager) CloseAll() error {
 	defer cm.mu.Unlock()
 
 	// Close all Revenium clients
+	var errs []error
 	for _, client := range cm.reveniumClients {
-		if err := client.Close(); err != nil {
-			return err
-		}
+		errs = append(errs, client.Close())
 	}
 
 	// Clear caches
 	cm.reveniumClients = make(map[string]*ReveniumGrok)
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // GetClientCount returns the number of cached clients

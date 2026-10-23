@@ -23,10 +23,10 @@ func TestSanitizeCredentials_AllPatterns(t *testing.T) {
 		{"github server", "ghs_" + strings.Repeat("b", 36), "ghs_***REDACTED***"},
 		{"jwt token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456", "***REDACTED_JWT***"},
 		{"bearer token", "Bearer eyJhbGciOiJIUzI1NiJ9abcdef1234567890", "Bearer ***REDACTED***"},
-		{"api key pattern", `api_key="abcdefghij1234567890extra"`, "api_key: ***REDACTED***"},
-		{"token pattern", `token = "abcdefghij1234567890extra"`, "token: ***REDACTED***"},
-		{"password pattern", `password="mysecretpassword123"`, "password: ***REDACTED***"},
-		{"secret pattern", `secret=verylongsecretvalue99`, "secret: ***REDACTED***"},
+		{"api key pattern", `api_key="abcdefghij1234567890extra"`, `api_key="***REDACTED***"`},
+		{"token pattern", `token = "abcdefghij1234567890extra"`, `token = "***REDACTED***"`},
+		{"password pattern", `password="mysecretpassword123"`, `password="***REDACTED***"`},
+		{"secret pattern", `secret=verylongsecretvalue99`, "secret=***REDACTED***"},
 	}
 
 	for _, tt := range tests {
@@ -49,7 +49,7 @@ func TestTruncateString(t *testing.T) {
 
 	long := strings.Repeat("a", 200)
 	result := TruncateString(long, 50)
-	assert.True(t, strings.HasSuffix(result, "... [truncated]"))
+	assert.True(t, strings.HasSuffix(result, "...[TRUNCATED]"))
 	assert.LessOrEqual(t, len([]rune(result)), 50)
 
 	tiny := TruncateString(long, 5)

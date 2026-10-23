@@ -1,6 +1,9 @@
 package metering
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const MiddlewareSource = "revenium-go-sdk"
 
@@ -28,14 +31,33 @@ type MeteringPayload struct {
 	MiddlewareSource        string `json:"middlewareSource"`
 	ModelSource             string `json:"modelSource,omitempty"`
 
+	CacheCreation5mTokenCount *int64 `json:"cacheCreation5mTokenCount,omitempty"`
+	CacheCreation1hTokenCount *int64 `json:"cacheCreation1hTokenCount,omitempty"`
+
 	SystemFingerprint string   `json:"systemFingerprint,omitempty"`
 	Temperature       *float64 `json:"temperature,omitempty"`
 	ErrorReason       string   `json:"errorReason,omitempty"`
+	ErrorCode         *int     `json:"errorCode,omitempty"`
+	// CompletionStatus is the outcome Revenium's video endpoint stores; that
+	// endpoint keeps no stop reason.
+	CompletionStatus string `json:"completionStatus,omitempty"`
 
 	ActualImageCount         *int                   `json:"actualImageCount,omitempty"`
 	RequestedImageCount      *int                   `json:"requestedImageCount,omitempty"`
 	DurationSeconds          *float64               `json:"durationSeconds,omitempty"`
 	RequestedDurationSeconds *float64               `json:"requestedDurationSeconds,omitempty"`
+	BillingUnit              BillingUnit            `json:"billingUnit,omitempty"`
+	Resolution               string                 `json:"resolution,omitempty"`
+	Quality                  string                 `json:"quality,omitempty"`
+	Style                    string                 `json:"style,omitempty"`
+	Format                   string                 `json:"format,omitempty"`
+	CharacterCount           *int64                 `json:"characterCount,omitempty"`
+	InputAudioTokenCount     *int64                 `json:"inputAudioTokenCount,omitempty"`
+	Language                 string                 `json:"language,omitempty"`
+	TargetLanguage           string                 `json:"targetLanguage,omitempty"`
+	ResponseFormat           string                 `json:"responseFormat,omitempty"`
+	Voice                    string                 `json:"voice,omitempty"`
+	Speed                    *float64               `json:"speed,omitempty"`
 	Attributes               map[string]interface{} `json:"attributes,omitempty"`
 
 	InputMessages    string `json:"inputMessages,omitempty"`
@@ -51,6 +73,7 @@ type MeteringPayload struct {
 	ParentTransactionID  string                 `json:"parentTransactionId,omitempty"`
 	TraceType            string                 `json:"traceType,omitempty"`
 	TraceName            string                 `json:"traceName,omitempty"`
+	TransactionName      string                 `json:"transactionName,omitempty"`
 	TicketID             string                 `json:"ticketId,omitempty"`
 	AgenticJobID         string                 `json:"agenticJobId,omitempty"` // Direct assignment is unchecked; see sanitizeAgenticJobID.
 	AgenticJobName       string                 `json:"agenticJobName,omitempty"`
@@ -59,13 +82,41 @@ type MeteringPayload struct {
 	Environment          string                 `json:"environment,omitempty"`
 	Region               string                 `json:"region,omitempty"`
 	RetryNumber          *int                   `json:"retryNumber,omitempty"`
-	CredentialAlias      string                 `json:"credentialAlias,omitempty"`
+	CredentialAlias      string                 `json:"-"`
 	Subscriber           map[string]interface{} `json:"subscriber,omitempty"`
 	TaskID               string                 `json:"taskId,omitempty"`
 	VideoJobID           string                 `json:"videoJobId,omitempty"`
 	AudioJobID           string                 `json:"audioJobId,omitempty"`
 	ResponseQualityScore *float64               `json:"responseQualityScore,omitempty"`
 	MediationLatency     *float64               `json:"mediationLatency,omitempty"`
+
+	AgentVersion               string   `json:"agentVersion,omitempty"`
+	SquadID                    string   `json:"squadId,omitempty"`
+	SquadName                  string   `json:"squadName,omitempty"`
+	SquadRole                  string   `json:"squadRole,omitempty"`
+	SystemPrompt               string   `json:"systemPrompt,omitempty"`
+	BillingSkipped             *bool    `json:"billingSkipped,omitempty"`
+	PricingTier                string   `json:"pricingTier,omitempty"`
+	RequestedServiceTier       string   `json:"requestedServiceTier,omitempty"`
+	ActualServiceTier          string   `json:"actualServiceTier,omitempty"`
+	PriorityTier               string   `json:"priorityTier,omitempty"`
+	SubscriptionTier           string   `json:"subscriptionTier,omitempty"`
+	CostMultiplier             *float64 `json:"costMultiplier,omitempty"`
+	CodingAssistantAccountUUID string   `json:"codingAssistantAccountUuid,omitempty"`
+	Effort                     string   `json:"effort,omitempty"`
+	SpeedMode                  string   `json:"-"`
+	QuerySource                string   `json:"querySource,omitempty"`
+	SubagentType               string   `json:"subagentType,omitempty"`
+	PromptID                   string   `json:"promptId,omitempty"`
+	PromptLength               *int64   `json:"promptLength,omitempty"`
+	ClientSurface              string   `json:"clientSurface,omitempty"`
+	SkillName                  string   `json:"skillName,omitempty"`
+	SkillInvocationTrigger     string   `json:"skillInvocationTrigger,omitempty"`
+	SkillSource                string   `json:"skillSource,omitempty"`
+	SkillKind                  string   `json:"skillKind,omitempty"`
+	SkillPluginName            string   `json:"skillPluginName,omitempty"`
+	SkillMarketplaceName       string   `json:"skillMarketplaceName,omitempty"`
+	SourceTransactionID        string   `json:"sourceTransactionId,omitempty"`
 
 	InputTokenCost         *float64 `json:"inputTokenCost,omitempty"`
 	OutputTokenCost        *float64 `json:"outputTokenCost,omitempty"`
@@ -74,6 +125,20 @@ type MeteringPayload struct {
 	TotalCost              *float64 `json:"totalCost,omitempty"`
 
 	FailureCode string `json:"failureCode,omitempty"`
+}
+
+// MarshalJSON sends SpeedMode, the speed mode of a completion ("fast" or
+// "normal"), under the record's "speed" key, which audio records use for the
+// numeric text-to-speech rate held in Speed.
+func (p MeteringPayload) MarshalJSON() ([]byte, error) {
+	type wireRecord MeteringPayload
+	if p.SpeedMode == "" || p.Speed != nil {
+		return json.Marshal(wireRecord(p))
+	}
+	return json.Marshal(struct {
+		wireRecord
+		Speed string `json:"speed"`
+	}{wireRecord(p), p.SpeedMode})
 }
 
 type PayloadBuilder struct {
@@ -114,6 +179,12 @@ func (b *PayloadBuilder) WithReasoningTokens(reasoning, cacheCreation, cacheRead
 	b.payload.ReasoningTokenCount = reasoning
 	b.payload.CacheCreationTokenCount = cacheCreation
 	b.payload.CacheReadTokenCount = cacheRead
+	return b
+}
+
+func (b *PayloadBuilder) WithCacheCreationByTTL(fiveMinute, oneHour *int64) *PayloadBuilder {
+	b.payload.CacheCreation5mTokenCount = fiveMinute
+	b.payload.CacheCreation1hTokenCount = oneHour
 	return b
 }
 
@@ -181,14 +252,12 @@ func (b *PayloadBuilder) WithAttributes(attrs map[string]interface{}) *PayloadBu
 	return b
 }
 
+// WithPromptCapture stores a prompt and reply under the rules the providers follow: nothing is
+// stored unless REVENIUM_CAPTURE_PROMPTS is on, credentials are redacted, and each field is cut to
+// REVENIUM_MAX_PROMPT_SIZE. input is a JSON list of chat messages or plain prompt text; truncated
+// says the caller already cut what it passes.
 func (b *PayloadBuilder) WithPromptCapture(input, output string, truncated bool) *PayloadBuilder {
-	if input != "" {
-		b.payload.InputMessages = input
-	}
-	if output != "" {
-		b.payload.OutputResponse = output
-	}
-	b.payload.PromptsTruncated = truncated
+	applyBuilderCapture(b.payload, input, output, truncated)
 	return b
 }
 

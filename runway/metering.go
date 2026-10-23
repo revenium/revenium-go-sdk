@@ -1,92 +1,87 @@
 package runway
 
 import (
-	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
-func mapRunwayStopReason(status TaskStatus, err *string) string {
-	if err != nil {
-		return "ERROR"
-	}
-	switch status {
-	case TaskStatusFailed:
-		return "ERROR"
-	case TaskStatusCanceled:
-		return "CANCELLED"
-	default:
-		return "END"
-	}
-}
-
-func buildVideoMeteringPayload(result *VideoGenerationResult, subtype string, metadata *UsageMetadata, capturePrompts bool, startTime time.Time) *metering.MeteringPayload {
+// buildVideoMeteringPayload records a task that succeeded, or one the SDK
+// stopped waiting for, whose result.Error is the SDK's own reason. A task
+// Runway reports failed or canceled is recorded by buildEndedTaskPayload.
+func buildVideoMeteringPayload(result *VideoGenerationResult, subtype string, videoSeconds float64, metadata map[string]interface{}, capturePrompts bool, startTime time.Time) *metering.MeteringPayload {
 	b := metering.NewPayload(metering.OperationVideo, result.Model, "runway").
 		WithTiming(startTime, result.Duration).
 		WithModelSource("RUNWAY").
 		WithOperationSubtype(subtype).
-		WithTransactionID(result.ID).
-		WithStopReason(mapRunwayStopReason(result.Status, result.Error))
+		WithTransactionID(result.ID)
 
-	if result.Error != nil {
+	switch {
+	case result.Error != nil:
 		b.WithError(*result.Error)
-	}
-	if result.FailureCode != nil {
-		b.WithFailureCode(*result.FailureCode)
-	}
-
-	var videoDuration float64 = 5.0
-	var requestedDuration float64 = 5.0
-
-	if result.Metadata != nil {
-		if dur, ok := result.Metadata["duration"].(int); ok {
-			videoDuration = float64(dur)
-		} else if dur, ok := result.Metadata["duration"].(float64); ok {
-			videoDuration = dur
-		} else if dur, ok := result.Metadata["durationSeconds"].(float64); ok {
-			videoDuration = dur
-		}
-
-		if reqDur, ok := result.Metadata["requestedDuration"].(int); ok {
-			requestedDuration = float64(reqDur)
-		} else if reqDur, ok := result.Metadata["requestedDuration"].(float64); ok {
-			requestedDuration = reqDur
-		} else if reqDur, ok := result.Metadata["requestedDurationSeconds"].(float64); ok {
-			requestedDuration = reqDur
-		} else {
-			requestedDuration = videoDuration
-		}
+	case !isBillableSeconds(videoSeconds):
+		b.WithError(unknownVideoLengthReason(result.Model))
 	}
 
-	b.WithVideoDuration(videoDuration, requestedDuration)
+	b.WithVideoDuration(videoSeconds, videoSeconds)
 
 	payload := b.Build()
 
-	if metadata != nil {
-		md := usageMetadataToMap(metadata)
-		metering.ApplyMetadata(payload, md)
-	}
+	metering.ApplyMetadata(payload, metadata)
 
-	if capturePrompts && result.Metadata != nil {
-		if prompt, ok := result.Metadata["_capturedPrompt"].(string); ok && prompt != "" {
-			inputMessages, truncated := metering.FormatPromptAsInputMessages(prompt)
-			if inputMessages != "" {
-				payload.InputMessages = inputMessages
-			}
-			payload.PromptsTruncated = truncated
-			core.Debug("Prompt capture enabled: captured %d chars", len(prompt))
-		}
-		if len(result.OutputURLs) > 0 {
-			outputJSON, err := json.Marshal(result.OutputURLs)
-			if err == nil {
-				payload.OutputResponse = string(outputJSON)
-			}
-		}
+	if capturePrompts {
+		metering.ApplyCapturedPrompt(payload, capturedPrompt(result), capturedOutput(result))
 	}
 
 	return payload
+}
+
+func taskRecordStart(record taskRecord, startTime time.Time) *metering.PayloadBuilder {
+	return metering.NewPayload(metering.OperationVideo, record.model, "runway").
+		WithTiming(startTime, time.Since(startTime)).
+		WithModelSource("RUNWAY").
+		WithOperationSubtype(record.subtype).
+		WithVideoDuration(0, record.videoSeconds)
+}
+
+// buildRejectedTaskPayload records a task Runway refused to create.
+func buildRejectedTaskPayload(record taskRecord, startTime time.Time, err error, capturePrompts bool) *metering.MeteringPayload {
+	payload := taskRecordStart(record, startTime).Build()
+	metering.ApplyFailedCall(payload, metering.FailureOf(err), prompt.WithClientCaptureSetting(record.metadata, capturePrompts))
+	return payload
+}
+
+// buildEndedTaskPayload records a task Runway reports failed or canceled.
+// Runway bills neither, so the record has no length.
+func buildEndedTaskPayload(task acceptedTask, status *TaskStatusResponse, capturePrompts bool) *metering.MeteringPayload {
+	payload := taskRecordStart(task.taskRecord, task.startTime).WithTransactionID(task.id).Build()
+	metadata := prompt.WithClientCaptureSetting(task.metadata, capturePrompts)
+	if status.Status == TaskStatusCanceled {
+		metering.ApplyCancelledCall(payload, metadata)
+		return payload
+	}
+	metering.ApplyFailedCall(payload, taskFailure(status), metadata)
+	return payload
+}
+
+// taskFailure names a failed task by Runway's failure code, such as
+// "SAFETY.INPUT.TEXT"; its message can quote the prompt.
+func taskFailure(status *TaskStatusResponse) metering.CallFailure {
+	message := "task failed"
+	if status.Error != nil {
+		message = *status.Error
+	}
+	var kind string
+	if status.FailureCode != nil {
+		kind = core.ErrorKindFrom(*status.FailureCode)
+	}
+	if kind == "" {
+		kind = "task_failed"
+	}
+	return metering.CallFailure{Err: errors.New(message), Kind: kind, ProviderReply: true}
 }
 
 func usageMetadataToMap(metadata *UsageMetadata) map[string]interface{} {

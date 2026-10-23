@@ -55,6 +55,12 @@ var providerRegistry = []ProviderPattern{
 		Patterns:    []string{"groq"},
 	},
 	{
+		Source:      "XAI",
+		DisplayName: "XAI",
+		Prefixes:    []string{"xai"},
+		Patterns:    []string{"grok"},
+	},
+	{
 		Source:      "OLLAMA",
 		DisplayName: "Ollama",
 		Prefixes:    []string{"ollama"},
