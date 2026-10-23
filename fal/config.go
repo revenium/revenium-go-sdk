@@ -9,6 +9,8 @@ import (
 	"github.com/revenium/revenium-go-sdk/core"
 )
 
+const defaultRequestTimeout = 1800 * time.Second
+
 type Config struct {
 	FalAPIKey      string
 	FalBaseURL     string
@@ -94,31 +96,13 @@ func (c *Config) loadFromEnv() error {
 		c.QueueBaseURL = core.GetEnvOrDefault("FAL_QUEUE_BASE_URL", defaultQueueBaseURL)
 	}
 	if c.RequestTimeout == 0 {
-		c.RequestTimeout = parseDurationFromEnv("FAL_REQUEST_TIMEOUT", 1800*time.Second)
-	}
-
-	programmaticOrgID := ""
-	programmaticProductID := ""
-	if c.Revenium != nil {
-		programmaticOrgID = c.Revenium.OrgID
-		programmaticProductID = c.Revenium.ProductID
+		c.RequestTimeout = parseDurationFromEnv("FAL_REQUEST_TIMEOUT", defaultRequestTimeout)
 	}
 
 	c.Revenium = core.MergeReveniumConfig(c.Revenium, core.LoadReveniumConfig())
 
-	if programmaticOrgID == "" {
-		if name := os.Getenv("REVENIUM_ORGANIZATION_NAME"); name != "" {
-			c.Revenium.OrgID = name
-		}
-	}
-	if programmaticProductID == "" {
-		if name := os.Getenv("REVENIUM_PRODUCT_NAME"); name != "" {
-			c.Revenium.ProductID = name
-		}
-	}
-
 	if !c.capturePromptsSet {
-		c.CapturePrompts = os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "true" || os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "1"
+		c.CapturePrompts = core.IsEnvFlagSet(core.EnvCapturePrompts)
 	}
 
 	core.InitializeLogger()

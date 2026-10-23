@@ -6,82 +6,165 @@ import (
 	"github.com/revenium/revenium-go-sdk/core"
 )
 
-// EvalContext carries the identifiers used to match enforcement rules
-// against an in-flight request. Field names mirror the Node SDK so the two
-// surfaces stay interchangeable.
-type EvalContext struct {
-	SubscriberID string
-	ProductName  string
-	Model        string
-	Provider     string
+const departmentBudgetFallbackName = "Department budget"
+
+// evaluate applies a rule set to the request and returns
+// ErrCostLimitExceeded when a BLOCK rule fires for this caller. It follows
+// the platform's own order: the server's department verdict first, then
+// every other rule whose filters cover the request, each judged on the
+// caller's own balance when the rule is a per-person cap. Rules configured
+// as observation-only (shadowMode / WARN_ONLY / THROTTLE) only log. A nil
+// return means "allow".
+//
+// Callers should propagate the error without wrapping so consumers can use
+// errors.As to recover the structured ErrCostLimitExceeded fields.
+func evaluate(rs ruleSet, ec EvalContext) error {
+	if err := rs.departmentBlock(ec); err != nil {
+		return err
+	}
+	for i := range rs.rules {
+		r := &rs.rules[i]
+		if r.isDepartmentRule() || !r.covers(ec) {
+			continue
+		}
+		currentValue, breached := r.breachFor(ec)
+		if !breached {
+			continue
+		}
+		if r.isObservationOnly() {
+			core.Warn("enforcement: cost limit rule breached (observation only) — rule=%d name=%q action=%s shadowMode=%v threshold=%.4f currentValue=%.4f",
+				r.RuleID, r.Name, r.Action, r.ShadowMode, r.Threshold, currentValue)
+			continue
+		}
+		if r.normalizedAction() == ActionBlock {
+			return r.costLimitError(currentValue, ec)
+		}
+		core.Warn("enforcement: cost limit rule breached but its action is not recognized, leaving enforcement to the platform — rule=%d name=%q action=%q threshold=%.4f currentValue=%.4f",
+			r.RuleID, r.Name, r.Action, r.Threshold, currentValue)
+	}
+	return nil
 }
 
-// evaluate applies the cached rule set to the given context and returns
-// ErrCostLimitExceeded when a BLOCK rule fires. Rules that are not
-// breached, not matching the context, or configured as observation-only
-// (shadowMode / WARN_ONLY / THROTTLE) do not produce an error — they only
-// log when the observation-only branch fires. A nil return means "allow".
-//
-// This mirrors Node's enforcePreCallRules: callers should propagate the
-// error without wrapping so consumers can use errors.As to recover the
-// structured ErrCostLimitExceeded fields.
-func evaluate(rules []Rule, ec EvalContext) error {
-	for i := range rules {
-		r := &rules[i]
-
-		if !r.Breached {
-			continue
+// breachFor reports whether the rule is breached for this caller and the
+// balance it was judged on. A per-person cap is judged only on the
+// caller's own breakdown entry; when the payload carries no breakdown for
+// a cost cap the SDK cannot tell whose balance is over, so it leaves the
+// decision to the platform rather than block everyone.
+func (r *Rule) breachFor(ec EvalContext) (float64, bool) {
+	if !r.groupedBy(DimensionSubscriber) {
+		return r.CurrentValue, r.Breached
+	}
+	if len(r.GroupBreakdown) > 0 {
+		entry := r.groupEntryFor(ec)
+		if entry == nil || !entry.Breached {
+			return 0, false
 		}
-		if !matches(r, ec) {
-			continue
-		}
+		return entry.CurrentValue, true
+	}
+	if r.measuresCost() {
+		return 0, false
+	}
+	return r.CurrentValue, r.Breached
+}
 
-		if r.ShadowMode || r.Action == ActionWarnOnly || r.Action == ActionThrottle {
-			core.Warn("enforcement: cost limit rule breached (observation only) — rule=%d name=%q action=%s shadowMode=%v threshold=%.4f currentValue=%.4f subscriberId=%s",
-				r.RuleID, r.Name, r.Action, r.ShadowMode, r.Threshold, r.CurrentValue, ec.SubscriberID)
-			continue
-		}
-
-		if r.Action == ActionBlock {
-			return &ErrCostLimitExceeded{
-				RuleID:       strconv.FormatInt(r.RuleID, 10),
-				RuleName:     r.Name,
-				Threshold:    r.Threshold,
-				CurrentValue: r.CurrentValue,
-				PeriodType:   r.PeriodType,
-				Action:       r.Action,
-				Context:      ec,
+func (r *Rule) groupEntryFor(ec EvalContext) *GroupEntry {
+	for _, key := range ec.groupKeys() {
+		for i := range r.GroupBreakdown {
+			if r.GroupBreakdown[i].GroupValue == key {
+				return &r.GroupBreakdown[i]
 			}
 		}
 	}
 	return nil
 }
 
-// matches returns true when the rule applies to the given evaluation
-// context. An empty field on the rule means "match any" for that
-// dimension, but a rule with *all* scope fields empty is rejected: it
-// would silently act as a team-wide global block, turning a single
-// misconfigured API response into a denial of service across every
-// tenant. Server-side rules are expected to carry at least one scope
-// identifier — either as a flat field or, on the v2 wire format, as an
-// IS entry in `filters[]` (Rule.UnmarshalJSON back-fills the flat fields
-// from those, so the same check covers both shapes).
-func matches(r *Rule, ec EvalContext) bool {
-	if r.SubscriberID == "" && r.ProductName == "" && r.Model == "" && r.Provider == "" {
-		core.Warn("enforcement: rule %d has no scope (no subscriberId/productName/model/provider — filters=%d); skipping to avoid global-block footgun", r.RuleID, len(r.Filters))
-		return false
+// departmentBlock applies the server's department verdict for the caller.
+// The block map is the whole verdict: a hit naming a rule missing from the
+// payload still blocks, because the server publishes the map only for
+// departments it has already found over budget. When the server also lists
+// the caller's candidate caps, the first one covering this call decides
+// instead; a single slot cannot say whether a second, covering cap is hidden
+// behind it, so it is never narrowed to the call.
+func (rs ruleSet) departmentBlock(ec EvalContext) error {
+	email := normalizeEmail(ec.SubscriberEmail)
+	if candidates, listed := rs.departmentCandidates[email]; listed {
+		return rs.departmentCandidateVerdict(candidates, ec)
 	}
-	if r.SubscriberID != "" && r.SubscriberID != ec.SubscriberID {
-		return false
+	ruleID, blocked := rs.departmentBlocks[email]
+	if !blocked {
+		return nil
 	}
-	if r.ProductName != "" && r.ProductName != ec.ProductName {
-		return false
+	balance, hasBalance := rs.departmentBalances[email]
+	return rs.departmentBudgetVerdict(ruleID, balance, hasBalance, ec)
+}
+
+func (rs ruleSet) departmentCandidateVerdict(candidates []departmentCandidate, ec EvalContext) error {
+	call := ec.caseFolded()
+	for _, c := range candidates {
+		r := rs.ruleByID(c.ruleID)
+		if r != nil && !r.coversFoldedCallScope(call) {
+			continue
+		}
+		if c.tier == candidateTierWarn {
+			rs.warnNearLimitOnce(normalizeEmail(ec.SubscriberEmail), c.ruleID)
+			return nil
+		}
+		return rs.departmentBudgetVerdict(c.ruleID, c.balance, c.hasBalance, ec)
 	}
-	if r.Model != "" && r.Model != ec.Model {
-		return false
+	return nil
+}
+
+func (rs ruleSet) warnNearLimitOnce(email string, ruleID int64) {
+	if rs.nearLimitLogged != nil {
+		if _, seen := rs.nearLimitLogged.LoadOrStore(nearLimitKey{email, ruleID}, struct{}{}); seen {
+			return
+		}
 	}
-	if r.Provider != "" && r.Provider != ec.Provider {
-		return false
+	core.Warn("enforcement: department budget rule near its limit — rule=%d", ruleID)
+}
+
+type nearLimitKey struct {
+	email  string
+	ruleID int64
+}
+
+func (rs ruleSet) departmentBudgetVerdict(ruleID int64, balance float64, hasBalance bool, ec EvalContext) error {
+	r := rs.ruleByID(ruleID)
+	if r == nil {
+		return &ErrCostLimitExceeded{
+			RuleID:       strconv.FormatInt(ruleID, 10),
+			RuleName:     departmentBudgetFallbackName,
+			CurrentValue: balance,
+			Action:       ActionBlock,
+			Context:      ec,
+		}
 	}
-	return true
+	if !r.blocksAsDepartmentBudget() {
+		core.Warn("enforcement: department budget rule breached (observation only) — rule=%d name=%q action=%s shadowMode=%v",
+			r.RuleID, r.Name, r.Action, r.ShadowMode)
+		return nil
+	}
+	if !hasBalance {
+		balance = r.CurrentValue
+	}
+	return r.costLimitError(balance, ec)
+}
+
+// blocksAsDepartmentBudget treats a missing action as BLOCK: the map entry
+// is already the server's blocking decision.
+func (r *Rule) blocksAsDepartmentBudget() bool {
+	action := r.normalizedAction()
+	return !r.ShadowMode && (action == "" || action == ActionBlock)
+}
+
+func (r *Rule) costLimitError(currentValue float64, ec EvalContext) *ErrCostLimitExceeded {
+	return &ErrCostLimitExceeded{
+		RuleID:       strconv.FormatInt(r.RuleID, 10),
+		RuleName:     r.Name,
+		Threshold:    r.Threshold,
+		CurrentValue: currentValue,
+		PeriodType:   r.PeriodType,
+		Action:       ActionBlock,
+		Context:      ec,
+	}
 }

@@ -9,6 +9,11 @@ import (
 // ErrorTypeTask is a Runway-specific error type for task polling errors
 const ErrorTypeTask core.ErrorType = "TASK_ERROR"
 
+// ErrMissingSourceDuration is returned by UpscaleVideo when VideoUpscaleRequest.SourceDurationSeconds is not set
+var ErrMissingSourceDuration = core.NewValidationError(
+	"VideoUpscaleRequest.SourceDurationSeconds must be the input video's length in seconds: "+
+		"Runway does not report the upscaled video's length, so the upscale cannot be billed without it", nil)
+
 // NewTaskError creates a new task polling error
 func NewTaskError(message string, err error) *core.ReveniumError {
 	return &core.ReveniumError{

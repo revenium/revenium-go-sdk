@@ -1,7 +1,9 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,6 +161,8 @@ func ConvertBedrockARNToAnthropicModel(bedrockModel string) (string, error) {
 	return "", fmt.Errorf("could not parse Bedrock model ID '%s': unrecognized format", bedrockModel)
 }
 
+const bedrockAnthropicVersion = "bedrock-2023-05-31"
+
 type BedrockAdapter struct {
 	config *Config
 	client BedrockClient
@@ -195,6 +199,9 @@ func loadAWSConfig(cfg *Config) (aws.Config, error) {
 	opts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.AWSRegion),
 	}
+	if cfg.bedrockHTTPClient != nil {
+		opts = append(opts, awsconfig.WithHTTPClient(cfg.bedrockHTTPClient))
+	}
 
 	// Add credentials if provided
 	if cfg.AWSAccessKeyID != "" && cfg.AWSSecretAccessKey != "" {
@@ -202,7 +209,7 @@ func loadAWSConfig(cfg *Config) (aws.Config, error) {
 			credentials.NewStaticCredentialsProvider(
 				cfg.AWSAccessKeyID,
 				cfg.AWSSecretAccessKey,
-				"", // session token (optional)
+				cfg.AWSSessionToken,
 			),
 		))
 		core.Debug("Using static AWS credentials")
@@ -225,20 +232,11 @@ func loadAWSConfig(cfg *Config) (aws.Config, error) {
 
 // CreateMessage creates a message using AWS Bedrock
 func (ba *BedrockAdapter) CreateMessage(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	// Step 1: Transform Anthropic request to Bedrock format
-	bedrockPayload := ba.TransformRequestToBedrockFormat(params)
-
-	// Step 2: Marshal payload to JSON
-	payloadJSON, err := json.Marshal(bedrockPayload)
+	payloadJSON, err := invokeModelBody(params)
 	if err != nil {
-		core.Debug("Failed to marshal Bedrock payload: %v", err)
-		return nil, fmt.Errorf("failed to marshal bedrock payload: %w", err)
+		return nil, err
 	}
 
-	// Log at DEBUG level (without showing payload content for security)
-	core.Debug("Bedrock payload prepared")
-
-	// Step 3: Call Bedrock API with model mapping
 	modelID := GetBedrockModelID(string(params.Model), ba.config)
 	core.Debug("Calling Bedrock API")
 
@@ -254,17 +252,14 @@ func (ba *BedrockAdapter) CreateMessage(ctx context.Context, params anthropic.Me
 		return nil, fmt.Errorf("bedrock api error: %w", err)
 	}
 
-	// Step 4: Parse Bedrock response
 	var bedrockResp map[string]interface{}
 	if err := json.Unmarshal(invokeOutput.Body, &bedrockResp); err != nil {
 		core.Debug("Failed to unmarshal Bedrock response: %v", err)
 		return nil, fmt.Errorf("failed to unmarshal bedrock response: %w", err)
 	}
 
-	// Log the response at DEBUG level
 	core.Debug("Bedrock response received successfully")
 
-	// Step 5: Transform Bedrock response to Anthropic format
 	anthropicResp := ba.TransformResponseFromBedrockFormat(bedrockResp)
 	if anthropicResp == nil {
 		return nil, fmt.Errorf("failed to transform bedrock response")
@@ -276,17 +271,11 @@ func (ba *BedrockAdapter) CreateMessage(ctx context.Context, params anthropic.Me
 
 // CreateMessageStream creates a streaming message using AWS Bedrock
 func (ba *BedrockAdapter) CreateMessageStream(ctx context.Context, params anthropic.MessageNewParams) (interface{}, error) {
-	// Step 1: Transform Anthropic request to Bedrock format
-	bedrockPayload := ba.TransformRequestToBedrockFormat(params)
-
-	// Step 2: Marshal payload to JSON
-	payloadJSON, err := json.Marshal(bedrockPayload)
+	payloadJSON, err := invokeModelBody(params)
 	if err != nil {
-		core.Debug("Failed to marshal Bedrock payload: %v", err)
-		return nil, fmt.Errorf("failed to marshal bedrock payload: %w", err)
+		return nil, err
 	}
 
-	// Step 3: Call Bedrock streaming API with model mapping
 	modelID := GetBedrockModelID(string(params.Model), ba.config)
 	core.Debug("Calling Bedrock streaming API")
 
@@ -311,31 +300,13 @@ func (ba *BedrockAdapter) CreateMessageStream(ctx context.Context, params anthro
 func (ba *BedrockAdapter) CreateMessageConverse(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	modelID := GetBedrockModelID(string(params.Model), ba.config)
 
-	converseMessages := transformToConverseMessages(params.Messages)
-	input := &bedrockruntime.ConverseInput{
-		ModelId:  aws.String(modelID),
-		Messages: converseMessages,
-		System:   transformSystemPrompt(params.System),
-	}
-
-	if params.MaxTokens != 0 {
-		input.InferenceConfig = &brtypes.InferenceConfiguration{
-			MaxTokens: aws.Int32(int32(params.MaxTokens)),
-		}
-	}
-	if len(params.StopSequences) > 0 {
-		seqs := make([]string, len(params.StopSequences))
-		for i, s := range params.StopSequences {
-			seqs[i] = string(s)
-		}
-		if input.InferenceConfig == nil {
-			input.InferenceConfig = &brtypes.InferenceConfiguration{}
-		}
-		input.InferenceConfig.StopSequences = seqs
+	request, err := buildConverseRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
 	core.Debug("Calling Bedrock Converse API")
-	out, err := ba.client.Converse(ctx, input)
+	out, err := ba.client.Converse(ctx, request.converseInput(modelID))
 	if err != nil {
 		return nil, fmt.Errorf("bedrock converse api error: %w", err)
 	}
@@ -349,46 +320,23 @@ func (ba *BedrockAdapter) CreateMessageConverse(ctx context.Context, params anth
 		msg.ID = reqID
 	}
 
-	reflect.ValueOf(msg).Elem().FieldByName("Model").SetString(modelID)
+	msg.Model = anthropic.Model(recordedBedrockModel(modelID))
 
 	if msgOut, ok := out.Output.(*brtypes.ConverseOutputMemberMessage); ok {
-		var textParts []string
-		for _, block := range msgOut.Value.Content {
-			if tb, ok := block.(*brtypes.ContentBlockMemberText); ok {
-				textParts = append(textParts, tb.Value)
-			}
+		content, err := anthropicContentFromConverse(msgOut.Value.Content)
+		if err != nil {
+			return nil, err
 		}
-		if len(textParts) > 0 {
-			fullText, _ := json.Marshal(strings.Join(textParts, ""))
-			contentJSON := `[{"type":"text","text":` + string(fullText) + `}]`
-			contentField := reflect.ValueOf(msg).Elem().FieldByName("Content")
-			if contentField.IsValid() && contentField.CanSet() {
-				contentValue := reflect.New(contentField.Type())
-				if err := json.Unmarshal([]byte(contentJSON), contentValue.Interface()); err == nil {
-					contentField.Set(contentValue.Elem())
-				}
-			}
-		}
+		msg.Content = content
 	}
 
-	reflect.ValueOf(msg).Elem().FieldByName("StopReason").SetString(convertConverseStopReason(out.StopReason))
-
+	msg.StopReason = anthropic.StopReason(convertConverseStopReason(out.StopReason))
 	if out.Usage != nil {
-		usageField := reflect.ValueOf(msg).Elem().FieldByName("Usage")
-		if usageField.IsValid() && usageField.CanSet() {
-			if out.Usage.InputTokens != nil {
-				usageField.FieldByName("InputTokens").SetInt(int64(*out.Usage.InputTokens))
-			}
-			if out.Usage.OutputTokens != nil {
-				usageField.FieldByName("OutputTokens").SetInt(int64(*out.Usage.OutputTokens))
-			}
-			if out.Usage.CacheReadInputTokens != nil {
-				usageField.FieldByName("CacheReadInputTokens").SetInt(int64(*out.Usage.CacheReadInputTokens))
-			}
-			if out.Usage.CacheWriteInputTokens != nil {
-				usageField.FieldByName("CacheCreationInputTokens").SetInt(int64(*out.Usage.CacheWriteInputTokens))
-			}
-		}
+		msg.Usage.InputTokens = int64(aws.ToInt32(out.Usage.InputTokens))
+		msg.Usage.OutputTokens = int64(aws.ToInt32(out.Usage.OutputTokens))
+		msg.Usage.CacheReadInputTokens = int64(aws.ToInt32(out.Usage.CacheReadInputTokens))
+		msg.Usage.CacheCreationInputTokens = int64(aws.ToInt32(out.Usage.CacheWriteInputTokens))
+		msg.Usage.CacheCreation = converseCacheCreation(out.Usage)
 	}
 
 	core.Debug("Successfully created message via Bedrock Converse")
@@ -398,31 +346,13 @@ func (ba *BedrockAdapter) CreateMessageConverse(ctx context.Context, params anth
 func (ba *BedrockAdapter) CreateMessageStreamConverse(ctx context.Context, params anthropic.MessageNewParams) (*ConverseStreamingWrapper, error) {
 	modelID := GetBedrockModelID(string(params.Model), ba.config)
 
-	converseMessages := transformToConverseMessages(params.Messages)
-	input := &bedrockruntime.ConverseStreamInput{
-		ModelId:  aws.String(modelID),
-		Messages: converseMessages,
-		System:   transformSystemPrompt(params.System),
-	}
-
-	if params.MaxTokens != 0 {
-		input.InferenceConfig = &brtypes.InferenceConfiguration{
-			MaxTokens: aws.Int32(int32(params.MaxTokens)),
-		}
-	}
-	if len(params.StopSequences) > 0 {
-		seqs := make([]string, len(params.StopSequences))
-		for i, s := range params.StopSequences {
-			seqs[i] = string(s)
-		}
-		if input.InferenceConfig == nil {
-			input.InferenceConfig = &brtypes.InferenceConfiguration{}
-		}
-		input.InferenceConfig.StopSequences = seqs
+	request, err := buildConverseRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
 	core.Debug("Calling Bedrock ConverseStream API")
-	out, err := ba.client.ConverseStream(ctx, input)
+	out, err := ba.client.ConverseStream(ctx, request.converseStreamInput(modelID))
 	if err != nil {
 		return nil, fmt.Errorf("bedrock conversestream api error: %w", err)
 	}
@@ -432,35 +362,58 @@ func (ba *BedrockAdapter) CreateMessageStreamConverse(ctx context.Context, param
 	return wrapper, nil
 }
 
-func transformToConverseMessages(messages []anthropic.MessageParam) []brtypes.Message {
-	var result []brtypes.Message
-	for _, msg := range messages {
-		var content []brtypes.ContentBlock
-		for _, block := range msg.Content {
-			if block.OfText != nil {
-				content = append(content, &brtypes.ContentBlockMemberText{Value: block.OfText.Text})
+func anthropicContentFromConverse(blocks []brtypes.ContentBlock) ([]anthropic.ContentBlockUnion, error) {
+	converted := make([]map[string]interface{}, 0, len(blocks))
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case *brtypes.ContentBlockMemberText:
+			converted = append(converted, map[string]interface{}{"type": "text", "text": b.Value})
+		case *brtypes.ContentBlockMemberToolUse:
+			toolUse, err := anthropicToolUse(b.Value)
+			if err != nil {
+				return nil, err
+			}
+			converted = append(converted, toolUse)
+		case *brtypes.ContentBlockMemberReasoningContent:
+			switch reasoning := b.Value.(type) {
+			case *brtypes.ReasoningContentBlockMemberReasoningText:
+				converted = append(converted, map[string]interface{}{
+					"type":      "thinking",
+					"thinking":  aws.ToString(reasoning.Value.Text),
+					"signature": aws.ToString(reasoning.Value.Signature),
+				})
+			case *brtypes.ReasoningContentBlockMemberRedactedContent:
+				converted = append(converted, map[string]interface{}{
+					"type": "redacted_thinking",
+					"data": base64.StdEncoding.EncodeToString(reasoning.Value),
+				})
 			}
 		}
-		if len(content) == 0 {
-			content = append(content, &brtypes.ContentBlockMemberText{Value: ""})
-		}
-		result = append(result, brtypes.Message{
-			Role:    brtypes.ConversationRole(msg.Role),
-			Content: content,
-		})
 	}
-	return result
+	encoded, err := json.Marshal(converted)
+	if err != nil {
+		return nil, err
+	}
+	var content []anthropic.ContentBlockUnion
+	err = json.Unmarshal(encoded, &content)
+	return content, err
 }
 
-func transformSystemPrompt(system []anthropic.TextBlockParam) []brtypes.SystemContentBlock {
-	if len(system) == 0 {
-		return nil
+func anthropicToolUse(toolUse brtypes.ToolUseBlock) (map[string]interface{}, error) {
+	input := json.RawMessage(`{}`)
+	if toolUse.Input != nil {
+		encoded, err := toolUse.Input.MarshalSmithyDocument()
+		if err != nil {
+			return nil, fmt.Errorf("decode bedrock tool input: %w", err)
+		}
+		input = encoded
 	}
-	var blocks []brtypes.SystemContentBlock
-	for _, s := range system {
-		blocks = append(blocks, &brtypes.SystemContentBlockMemberText{Value: s.Text})
-	}
-	return blocks
+	return map[string]interface{}{
+		"type":  "tool_use",
+		"id":    aws.ToString(toolUse.ToolUseId),
+		"name":  aws.ToString(toolUse.Name),
+		"input": input,
+	}, nil
 }
 
 func convertConverseStopReason(reason brtypes.StopReason) string {
@@ -476,74 +429,101 @@ func convertConverseStopReason(reason brtypes.StopReason) string {
 	case brtypes.StopReasonContentFiltered:
 		return "content_filtered"
 	case brtypes.StopReasonGuardrailIntervened:
-		return "guardrail_intervened"
+		return guardrailIntervenedStopReason
 	default:
 		return string(reason)
 	}
 }
 
-// TransformRequestToBedrockFormat converts an Anthropic request to Bedrock format
+// TransformRequestToBedrockFormat returns the InvokeModel body for params as
+// Go values: the request's fields that Bedrock's Claude body accepts, plus
+// the Bedrock anthropic_version. Integers that fit in int64 are int64,
+// other integers stay json.Number so they keep their exact value, and other
+// numbers are float64 (json.Number when outside the float64 range). It
+// returns nil when params cannot be encoded or hold a field Bedrock refuses.
 func (ba *BedrockAdapter) TransformRequestToBedrockFormat(params anthropic.MessageNewParams) map[string]interface{} {
-	// Build Bedrock request payload
-	payload := map[string]interface{}{
-		"messages":          transformMessages(params.Messages),
-		"anthropic_version": "bedrock-2023-05-31",
+	body, err := invokeModelBody(params)
+	if err != nil {
+		core.Debug("Failed to build the Bedrock request: %v", err)
+		return nil
 	}
-
-	// Add optional parameters if provided
-	if params.MaxTokens != 0 {
-		payload["max_tokens"] = params.MaxTokens
+	values, err := goValuesOf(body)
+	if err != nil {
+		return nil
 	}
-
-	// Note: Temperature, TopP, TopK use param.Opt type in Anthropic SDK
-	// We'll add them if they're set (non-zero values)
-	// This is a simplified approach - in production you'd need to check the Opt type properly
-
-	if len(params.StopSequences) > 0 {
-		payload["stop_sequences"] = params.StopSequences
-	}
-
-	core.Debug("Transformed Anthropic request to Bedrock format")
-	return payload
+	return values
 }
 
-// transformMessages converts Anthropic messages to Bedrock format
-func transformMessages(messages []anthropic.MessageParam) []map[string]interface{} {
-	var bedrockMessages []map[string]interface{}
+// invokeModelFields are the Messages API fields Bedrock's Claude InvokeModel
+// body accepts; it answers any other key with a ValidationException.
+var invokeModelFields = map[string]bool{
+	"messages": true, "max_tokens": true, "system": true, "temperature": true, "top_p": true, "top_k": true,
+	"tools": true, "tool_choice": true, "stop_sequences": true, "thinking": true, "output_config": true,
+}
 
-	for _, msg := range messages {
-		bedrockMsg := map[string]interface{}{}
-
-		// Determine role
-		bedrockMsg["role"] = string(msg.Role)
-
-		// Extract content from message content blocks using JSON marshaling
-		content := []map[string]interface{}{}
-
-		// Marshal the Content to JSON and unmarshal to extract the structure
-		if msg.Content != nil {
-			contentJSON, err := json.Marshal(msg.Content)
-			if err == nil {
-				var contentBlocks []map[string]interface{}
-				if err := json.Unmarshal(contentJSON, &contentBlocks); err == nil {
-					content = contentBlocks
-				}
-			}
-		}
-
-		// Fallback if no content was extracted
-		if len(content) == 0 {
-			content = append(content, map[string]interface{}{
-				"type": "text",
-				"text": "",
-			})
-		}
-
-		bedrockMsg["content"] = content
-		bedrockMessages = append(bedrockMessages, bedrockMsg)
+func invokeModelBody(params anthropic.MessageNewParams) ([]byte, error) {
+	fields, err := jsonObjectOf(params)
+	if err != nil {
+		return nil, fmt.Errorf("encode request for bedrock: %w", err)
 	}
+	body := jsonObject{}
+	for _, name := range sortedKeys(fields) {
+		switch {
+		case anthropicOnlyFields[name]:
+		case invokeModelFields[name]:
+			body[name] = fields[name]
+		default:
+			return nil, invokeModelCannotCarry(name)
+		}
+	}
+	body["anthropic_version"] = json.RawMessage(`"` + bedrockAnthropicVersion + `"`)
+	return json.Marshal(body)
+}
 
-	return bedrockMessages
+func invokeModelCannotCarry(part string) error {
+	return fmt.Errorf("%w: %s on InvokeModel, whose Claude request body has no such field", ErrBedrockCannotCarry, part)
+}
+
+func goValuesOf(encoded []byte) (map[string]interface{}, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var values map[string]interface{}
+	if err := decoder.Decode(&values); err != nil {
+		return nil, err
+	}
+	for key, value := range values {
+		values[key] = withGoNumbers(value)
+	}
+	return values, nil
+}
+
+func withGoNumbers(value interface{}) interface{} {
+	switch v := value.(type) {
+	case json.Number:
+		if integer, err := v.Int64(); err == nil {
+			return integer
+		}
+		if isIntegerLiteral(v) {
+			return v
+		}
+		if decimal, err := v.Float64(); err == nil {
+			return decimal
+		}
+		return v
+	case map[string]interface{}:
+		for key, item := range v {
+			v[key] = withGoNumbers(item)
+		}
+	case []interface{}:
+		for i, item := range v {
+			v[i] = withGoNumbers(item)
+		}
+	}
+	return value
+}
+
+func isIntegerLiteral(number json.Number) bool {
+	return !strings.ContainsAny(number.String(), ".eE")
 }
 
 // TransformResponseFromBedrockFormat converts a Bedrock response to Anthropic format
@@ -586,47 +566,31 @@ func (ba *BedrockAdapter) TransformResponseFromBedrockFormat(bedrockResp map[str
 		}
 	}
 
-	// Extract stop reason
 	if stopReason, ok := bedrockResp["stop_reason"].(string); ok {
 		reflect.ValueOf(msg).Elem().FieldByName("StopReason").SetString(stopReason)
 	}
+	if guardrailIntervened(bedrockResp) {
+		msg.StopReason = guardrailIntervenedStopReason
+	}
 
-	// Extract usage information
 	if usage, ok := bedrockResp["usage"].(map[string]interface{}); ok {
-		inputTokens := int64(0)
-		outputTokens := int64(0)
-		cacheCreationTokens := int64(0)
-		cacheReadTokens := int64(0)
-
-		if it, ok := usage["input_tokens"].(float64); ok {
-			inputTokens = int64(it)
-		}
-		if ot, ok := usage["output_tokens"].(float64); ok {
-			outputTokens = int64(ot)
-		}
-		// Bedrock's InvokeModel API passes through Anthropic's native response
-		// format, so cache token counts use the same JSON keys as the native API
-		// (unlike the Converse API above, which uses its own field names -
-		// CacheReadInputTokens / CacheWriteInputTokens on brtypes.TokenUsage)
-		if cct, ok := usage["cache_creation_input_tokens"].(float64); ok {
-			cacheCreationTokens = int64(cct)
-		}
-		if crt, ok := usage["cache_read_input_tokens"].(float64); ok {
-			cacheReadTokens = int64(crt)
-		}
-
-		// Set usage fields via reflection
-		usageField := reflect.ValueOf(msg).Elem().FieldByName("Usage")
-		if usageField.IsValid() && usageField.CanSet() {
-			usageField.FieldByName("InputTokens").SetInt(inputTokens)
-			usageField.FieldByName("OutputTokens").SetInt(outputTokens)
-			usageField.FieldByName("CacheCreationInputTokens").SetInt(cacheCreationTokens)
-			usageField.FieldByName("CacheReadInputTokens").SetInt(cacheReadTokens)
-		}
+		msg.Usage = decodeInvokeModelUsage(usage)
 	}
 
 	core.Debug("Transformed Bedrock response to Anthropic format")
 	return msg
+}
+
+func decodeInvokeModelUsage(usage map[string]interface{}) anthropic.Usage {
+	var decoded anthropic.Usage
+	encoded, err := json.Marshal(usage)
+	if err == nil {
+		err = json.Unmarshal(encoded, &decoded)
+	}
+	if err != nil {
+		core.Warn("Bedrock InvokeModel usage could not be read: %v", err)
+	}
+	return decoded
 }
 
 // FallbackToAnthropic falls back to Anthropic native API on Bedrock error
@@ -650,7 +614,12 @@ type BedrockStreamingWrapper struct {
 	outputTokens        int64
 	cacheReadTokens     int64
 	cacheCreationTokens int64
+	cacheWrites         cacheWriteSplit
+	passes              []billedPass
 	stopReason          string
+	guardrailIntervened bool
+	stopEventSeen       bool
+	reply               *streamedReply
 }
 
 func newBedrockStreamingWrapper(stream *bedrockruntime.InvokeModelWithResponseStreamOutput, modelID string) *BedrockStreamingWrapper {
@@ -688,40 +657,74 @@ func (bsw *BedrockStreamingWrapper) Next() bool {
 	if chunk, ok := event.(*brtypes.ResponseStreamMemberChunk); ok && chunk.Value.Bytes != nil {
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(chunk.Value.Bytes, &parsed); err == nil {
-			if delta, ok := parsed["delta"].(map[string]interface{}); ok {
-				if text, ok := delta["text"].(string); ok {
-					bsw.currentText = text
-				}
-				if sr, ok := delta["stop_reason"].(string); ok && sr != "" {
-					bsw.stopReason = sr
-				}
-			}
-			if metrics, ok := parsed["amazon-bedrock-invocationMetrics"].(map[string]interface{}); ok {
-				if v, ok := metrics["inputTokenCount"].(float64); ok {
-					bsw.inputTokens = int64(v)
-				}
-				if v, ok := metrics["outputTokenCount"].(float64); ok {
-					bsw.outputTokens = int64(v)
-				}
-			}
-			if usage, ok := parsed["usage"].(map[string]interface{}); ok {
-				if v, ok := usage["input_tokens"].(float64); ok {
-					bsw.inputTokens = int64(v)
-				}
-				if v, ok := usage["output_tokens"].(float64); ok {
-					bsw.outputTokens = int64(v)
-				}
-				if v, ok := usage["cache_read_input_tokens"].(float64); ok {
-					bsw.cacheReadTokens = int64(v)
-				}
-				if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
-					bsw.cacheCreationTokens = int64(v)
-				}
-			}
+			bsw.takeStreamEvent(parsed)
+		}
+		if bsw.reply != nil {
+			bsw.observeReply(chunk.Value.Bytes)
 		}
 	}
 
 	return true
+}
+
+func (bsw *BedrockStreamingWrapper) observeReply(encoded []byte) {
+	var event anthropic.MessageStreamEventUnion
+	if err := event.UnmarshalJSON(encoded); err == nil {
+		bsw.reply.observe(event)
+	}
+}
+
+func (bsw *BedrockStreamingWrapper) captureReply() {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	bsw.reply = newStreamedReply()
+}
+
+func (bsw *BedrockStreamingWrapper) capturedReply() (string, bool) {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	if bsw.reply == nil {
+		return "", true
+	}
+	return bsw.reply.text()
+}
+
+func (bsw *BedrockStreamingWrapper) takeStreamEvent(event map[string]interface{}) {
+	if event["type"] == "message_stop" {
+		bsw.stopEventSeen = true
+	}
+	if delta, ok := event["delta"].(map[string]interface{}); ok {
+		if text, ok := delta["text"].(string); ok {
+			bsw.currentText = text
+		}
+		if sr, ok := delta["stop_reason"].(string); ok && sr != "" {
+			bsw.stopReason = sr
+		}
+	}
+	for _, usage := range usageObjectsInStreamEvent(event) {
+		bsw.takeCacheWrites(usage, "cache_creation_input_tokens", cacheWriteSplitOf(decodeCacheCreation(usage)))
+		takeReportedCount(&bsw.inputTokens, usage, "input_tokens")
+		takeReportedCount(&bsw.outputTokens, usage, "output_tokens")
+		takeReportedCount(&bsw.cacheReadTokens, usage, "cache_read_input_tokens")
+		if passes, reported := billedPassesInDecodedUsage(usage); reported {
+			bsw.passes = passes
+		}
+	}
+	if guardrailIntervened(event) {
+		bsw.guardrailIntervened = true
+	}
+	if metrics, ok := event["amazon-bedrock-invocationMetrics"].(map[string]interface{}); ok {
+		takeReportedCount(&bsw.inputTokens, metrics, "inputTokenCount")
+		takeReportedCount(&bsw.outputTokens, metrics, "outputTokenCount")
+		takeReportedCount(&bsw.cacheReadTokens, metrics, "cacheReadInputTokenCount")
+		bsw.takeCacheWrites(metrics, "cacheWriteInputTokenCount", cacheWriteSplit{})
+	}
+}
+
+func takeReportedCount(count *int64, source map[string]interface{}, key string) {
+	if reported, ok := source[key].(float64); ok && reported > 0 {
+		*count = int64(reported)
+	}
 }
 
 func (bsw *BedrockStreamingWrapper) Current() interface{} {
@@ -748,10 +751,45 @@ func (bsw *BedrockStreamingWrapper) GetCacheTokens() (creation, read int64) {
 	return bsw.cacheCreationTokens, bsw.cacheReadTokens
 }
 
+func (bsw *BedrockStreamingWrapper) takeCacheWrites(source map[string]interface{}, totalKey string, split cacheWriteSplit) {
+	if split.isReported() {
+		bsw.cacheWrites = split
+	}
+	total, ok := source[totalKey].(float64)
+	if !ok || total <= 0 {
+		return
+	}
+	if int64(total) != bsw.cacheCreationTokens && !split.isReported() {
+		bsw.cacheWrites = cacheWriteSplit{}
+	}
+	bsw.cacheCreationTokens = int64(total)
+}
+
+func (bsw *BedrockStreamingWrapper) reportedCacheWriteSplit() cacheWriteSplit {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.cacheWrites
+}
+
+func (bsw *BedrockStreamingWrapper) reportedBilledPasses() []billedPass {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.passes
+}
+
 func (bsw *BedrockStreamingWrapper) GetStopReason() string {
 	bsw.mu.Lock()
 	defer bsw.mu.Unlock()
+	if bsw.guardrailIntervened {
+		return guardrailIntervenedStopReason
+	}
 	return bsw.stopReason
+}
+
+func (bsw *BedrockStreamingWrapper) reachedStopEvent() bool {
+	bsw.mu.Lock()
+	defer bsw.mu.Unlock()
+	return bsw.stopEventSeen
 }
 
 func (bsw *BedrockStreamingWrapper) Close() error {
@@ -779,7 +817,10 @@ type ConverseStreamingWrapper struct {
 	outputTokens        int64
 	cacheReadTokens     int64
 	cacheCreationTokens int64
+	cacheWrites         cacheWriteSplit
 	stopReason          string
+	stopEventSeen       bool
+	reply               *streamedReply
 }
 
 func newConverseStreamingWrapper(stream *bedrockruntime.ConverseStreamOutput, modelID string) *ConverseStreamingWrapper {
@@ -836,12 +877,32 @@ func (csw *ConverseStreamingWrapper) Next() bool {
 			if ev.Value.Usage.CacheWriteInputTokens != nil {
 				csw.cacheCreationTokens = int64(*ev.Value.Usage.CacheWriteInputTokens)
 			}
+			csw.cacheWrites = cacheWriteSplitOf(converseCacheCreation(ev.Value.Usage))
 		}
 	case *brtypes.ConverseStreamOutputMemberMessageStop:
 		csw.stopReason = convertConverseStopReason(ev.Value.StopReason)
+		csw.stopEventSeen = true
+	}
+	if csw.reply != nil {
+		csw.reply.observeConverse(event)
 	}
 
 	return true
+}
+
+func (csw *ConverseStreamingWrapper) captureReply() {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	csw.reply = newStreamedReply()
+}
+
+func (csw *ConverseStreamingWrapper) capturedReply() (string, bool) {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	if csw.reply == nil {
+		return "", true
+	}
+	return csw.reply.text()
 }
 
 func (csw *ConverseStreamingWrapper) GetAccumulatedTokens() (input, output, total int64) {
@@ -856,10 +917,22 @@ func (csw *ConverseStreamingWrapper) GetCacheTokens() (creation, read int64) {
 	return csw.cacheCreationTokens, csw.cacheReadTokens
 }
 
+func (csw *ConverseStreamingWrapper) reportedCacheWriteSplit() cacheWriteSplit {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.cacheWrites
+}
+
 func (csw *ConverseStreamingWrapper) GetStopReason() string {
 	csw.mu.Lock()
 	defer csw.mu.Unlock()
 	return csw.stopReason
+}
+
+func (csw *ConverseStreamingWrapper) reachedStopEvent() bool {
+	csw.mu.Lock()
+	defer csw.mu.Unlock()
+	return csw.stopEventSeen
 }
 
 func (csw *ConverseStreamingWrapper) Current() interface{} {
@@ -881,4 +954,17 @@ func (csw *ConverseStreamingWrapper) Close() error {
 		return csw.stream.GetStream().Close()
 	}
 	return nil
+}
+
+func usageObjectsInStreamEvent(event map[string]interface{}) []map[string]interface{} {
+	var usages []map[string]interface{}
+	if message, ok := event["message"].(map[string]interface{}); ok {
+		if usage, ok := message["usage"].(map[string]interface{}); ok {
+			usages = append(usages, usage)
+		}
+	}
+	if usage, ok := event["usage"].(map[string]interface{}); ok {
+		usages = append(usages, usage)
+	}
+	return usages
 }

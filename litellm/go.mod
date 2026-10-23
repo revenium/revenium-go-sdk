@@ -3,7 +3,7 @@ module github.com/revenium/revenium-go-sdk/litellm
 go 1.22
 
 require (
-	github.com/revenium/revenium-go-sdk/core v1.1.7
+	github.com/revenium/revenium-go-sdk/core v1.1.9
 	github.com/stretchr/testify v1.11.1
 )
 

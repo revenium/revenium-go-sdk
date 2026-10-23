@@ -253,3 +253,48 @@ func TestPayloadBuilder_OperationSubtype(t *testing.T) {
 		})
 	}
 }
+
+func TestPayloadBuilder_CacheCreationByTTLWireFormat(t *testing.T) {
+	fiveMinute, oneHour := int64(0), int64(12603)
+	p := NewPayload(OperationChat, "claude-haiku-4-5", "Anthropic").
+		WithReasoningTokens(0, 12603, 0).
+		WithCacheCreationByTTL(&fiveMinute, &oneHour).
+		Build()
+
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	assert.Equal(t, float64(12603), m["cacheCreationTokenCount"])
+	assert.Equal(t, float64(12603), m["cacheCreation1hTokenCount"])
+	assert.Equal(t, float64(0), m["cacheCreation5mTokenCount"], "a reported zero bucket is real data and must be sent")
+}
+
+func TestPayloadBuilder_CacheCreationByTTLOmitsUnreportedBuckets(t *testing.T) {
+	fiveMinute := int64(200)
+	p := NewPayload(OperationChat, "claude-haiku-4-5", "Anthropic").
+		WithCacheCreationByTTL(&fiveMinute, nil).
+		Build()
+
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	assert.Equal(t, float64(200), m["cacheCreation5mTokenCount"])
+	assert.NotContains(t, m, "cacheCreation1hTokenCount")
+}
+
+func TestNewPayload_OmitsCacheCreationByTTLByDefault(t *testing.T) {
+	data, err := json.Marshal(NewPayload(OperationChat, "gpt-4", "OPENAI").Build())
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	assert.NotContains(t, m, "cacheCreation5mTokenCount")
+	assert.NotContains(t, m, "cacheCreation1hTokenCount")
+}

@@ -3,6 +3,8 @@ package metering
 import (
 	"encoding/json"
 	"strconv"
+
+	"github.com/revenium/revenium-go-sdk/core"
 )
 
 var stringFields = map[string]*func(*MeteringPayload) *string{
@@ -17,6 +19,7 @@ var stringFields = map[string]*func(*MeteringPayload) *string{
 	"parentTransactionId": strSetter(func(p *MeteringPayload) *string { return &p.ParentTransactionID }),
 	"traceType":           strSetter(func(p *MeteringPayload) *string { return &p.TraceType }),
 	"traceName":           strSetter(func(p *MeteringPayload) *string { return &p.TraceName }),
+	"transactionName":     strSetter(func(p *MeteringPayload) *string { return &p.TransactionName }),
 	"ticketId":            strSetter(func(p *MeteringPayload) *string { return &p.TicketID }),
 	"agenticJobId":        strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobID }),
 	"agenticJobName":      strSetter(func(p *MeteringPayload) *string { return &p.AgenticJobName }),
@@ -47,6 +50,8 @@ var floatFields = map[string]func(*MeteringPayload, float64){
 	"totalCost":              func(p *MeteringPayload, v float64) { p.TotalCost = &v },
 }
 
+const retryNumberKey = "retryNumber"
+
 func strSetter(fn func(*MeteringPayload) *string) *func(*MeteringPayload) *string {
 	return &fn
 }
@@ -65,7 +70,7 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 			continue
 		}
 		if key == "errorReason" {
-			if s, ok := val.(string); ok && s != "" {
+			if s, ok := val.(string); ok && !core.IsBlank(s) {
 				payload.ErrorReason = s
 				payload.StopReason = "ERROR"
 			}
@@ -74,22 +79,18 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 		if setter == nil {
 			continue
 		}
-		if s, ok := val.(string); ok && s != "" {
-			if key == "agenticJobId" {
-				// An id the platform would reject costs the whole event, so
-				// drop it rather than let the API answer 400.
-				if s = sanitizeAgenticJobID(s, "request metadata"); s == "" {
-					continue
-				}
+		if s, ok := val.(string); ok && !core.IsBlank(s) {
+			if s = guardMetadataString(key, s); s == "" {
+				continue
 			}
 			*(*setter)(payload) = s
 		}
 	}
 
-	if s, ok := metadata["organizationName"].(string); ok && s != "" {
+	if s, ok := metadata["organizationName"].(string); ok && !core.IsBlank(s) {
 		payload.OrganizationName = s
 	}
-	if s, ok := metadata["productName"].(string); ok && s != "" {
+	if s, ok := metadata["productName"].(string); ok && !core.IsBlank(s) {
 		payload.ProductName = s
 	}
 
@@ -98,31 +99,19 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 		if !ok {
 			continue
 		}
-		switch v := val.(type) {
-		case float64:
-			setter(payload, v)
-		case float32:
-			setter(payload, float64(v))
-		case int:
-			setter(payload, float64(v))
-		case int64:
-			setter(payload, float64(v))
-		case json.Number:
-			if f, err := v.Float64(); err == nil {
-				setter(payload, f)
-			}
-		case string:
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				setter(payload, f)
-			}
+		f, ok := metadataNumber(val)
+		if !ok {
+			continue
 		}
+		if !isFinite(f) {
+			warnDroppedMetadataNumber(key, f)
+			continue
+		}
+		setter(payload, f)
 	}
 
-	if v, ok := metadata["retryNumber"].(int); ok {
-		payload.RetryNumber = &v
-	} else if v, ok := metadata["retryNumber"].(float64); ok {
-		i := int(v)
-		payload.RetryNumber = &i
+	if retry, ok := retryNumberFromMetadata(metadata[retryNumberKey]); ok {
+		payload.RetryNumber = &retry
 	}
 
 	if v, ok := metadata["subscriber"].(map[string]interface{}); ok {
@@ -132,4 +121,27 @@ func ApplyMetadata(payload *MeteringPayload, metadata map[string]interface{}) {
 	if s, ok := metadata["operationSubtype"].(string); ok {
 		applyOperationSubtype(payload, s)
 	}
+
+	applyRecordFields(payload, metadata)
+	warnUnrecognizedKeys(metadata)
+}
+
+func metadataNumber(val interface{}) (float64, bool) {
+	switch v := val.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		return f, err == nil
+	}
+	return 0, false
 }

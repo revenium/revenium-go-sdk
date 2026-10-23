@@ -1,6 +1,10 @@
 package metering
 
-import "time"
+import (
+	"time"
+
+	"github.com/revenium/revenium-go-sdk/core/prompt"
+)
 
 type ToolEventPayload struct {
 	IdempotencyKey       string                 `json:"-"`
@@ -27,10 +31,11 @@ type ToolEventBuilder struct {
 }
 
 func NewToolEvent(toolID string) *ToolEventBuilder {
+	transactionID := GenerateTransactionID()
 	return &ToolEventBuilder{
 		payload: &ToolEventPayload{
-			IdempotencyKey: GenerateTransactionID(),
-			TransactionID:  GenerateTransactionID(),
+			IdempotencyKey: transactionID,
+			TransactionID:  transactionID,
 			ToolID:         toolID,
 			Operation:      "execute",
 			Success:        true,
@@ -59,9 +64,24 @@ func (b *ToolEventBuilder) WithSuccess(success bool) *ToolEventBuilder {
 	return b
 }
 
+// WithError marks the tool call failed with msg as its errorMessage, with
+// credentials, query-string values and email addresses redacted and the text
+// cut to MaxToolErrorMessageLength. WithFailure is the safer choice for an
+// error value, whose text often holds request URLs and personal data.
 func (b *ToolEventBuilder) WithError(msg string) *ToolEventBuilder {
 	b.payload.Success = false
-	b.payload.ErrorMessage = msg
+	b.payload.ErrorMessage = prompt.RedactErrorText(msg, MaxToolErrorMessageLength)
+	return b
+}
+
+// WithFailure marks the tool call failed by err. The errorMessage names the
+// kind of error; its text is added, redacted, only when
+// REVENIUM_CAPTURE_ERROR_MESSAGES is on, and for an error that quotes a
+// provider's reply only when REVENIUM_CAPTURE_PROMPTS is on as well (see
+// ToolErrorMessage).
+func (b *ToolEventBuilder) WithFailure(err error) *ToolEventBuilder {
+	b.payload.Success = false
+	b.payload.ErrorMessage = ToolErrorMessage(err)
 	return b
 }
 
@@ -126,10 +146,16 @@ func (b *ToolEventBuilder) WithUsageMetadata(meta map[string]interface{}) *ToolE
 	return b
 }
 
+// WithTransactionID names this one tool call. The Idempotency-Key follows it
+// unless WithIdempotencyKey set a different key.
 func (b *ToolEventBuilder) WithTransactionID(id string) *ToolEventBuilder {
-	if id != "" {
-		b.payload.TransactionID = id
+	if id == "" {
+		return b
 	}
+	if b.payload.IdempotencyKey == b.payload.TransactionID {
+		b.payload.IdempotencyKey = id
+	}
+	b.payload.TransactionID = id
 	return b
 }
 

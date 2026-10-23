@@ -35,7 +35,7 @@ func MapGoogleFinishReason(finishReason genai.FinishReason, defaultReason core.R
 		return core.StopReasonEnd
 
 	// Token limits
-	case "MAX_TOKENS":
+	case "MAX_TOKENS", "CONTINUATION":
 		return core.StopReasonTokenLimit
 	case "TOO_MANY_TOOL_CALLS":
 		return core.StopReasonCompletionLimit

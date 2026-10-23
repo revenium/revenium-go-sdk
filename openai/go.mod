@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/openai/openai-go/v3 v3.66.0
-	github.com/revenium/revenium-go-sdk/core v1.1.7
+	github.com/revenium/revenium-go-sdk/core v1.1.9
 	github.com/stretchr/testify v1.12.1
 )
 

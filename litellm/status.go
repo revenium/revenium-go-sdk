@@ -32,28 +32,23 @@ func (r *ReveniumLiteLLM) IsEnabled() bool {
 
 // GetStatus returns the global middleware status; returns zero value when Initialize has not been called
 func GetStatus() MiddlewareStatus {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient == nil {
+	client, ok := sharedClient.Current()
+	if !ok {
 		return MiddlewareStatus{}
 	}
-	return globalClient.GetStatus()
+	return client.GetStatus()
 }
 
 // Enable toggles on metering emission for the globally initialized client
 func Enable() {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient != nil {
-		globalClient.Enable()
+	if client, ok := sharedClient.Current(); ok {
+		client.Enable()
 	}
 }
 
 // Disable toggles off metering emission for the globally initialized client
 func Disable() {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient != nil {
-		globalClient.Disable()
+	if client, ok := sharedClient.Current(); ok {
+		client.Disable()
 	}
 }

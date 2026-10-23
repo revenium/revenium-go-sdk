@@ -21,11 +21,18 @@ var testRetryConfig = &resilience.RetryConfig{
 	JitterFactor: 0,
 }
 
+func newTestBreaker() *resilience.CircuitBreaker {
+	config := resilience.DeliveryCircuitBreakerConfig()
+	config.RecoveryTimeout = time.Nanosecond
+	return resilience.NewCircuitBreaker(config)
+}
+
 func newTestClient(t *testing.T, baseURL string) *MeteringClient {
 	t.Helper()
 	client, err := NewMeteringClient(MeteringClientConfig{APIKey: "test-key", BaseURL: baseURL})
 	require.NoError(t, err)
 	client.retryConfig = testRetryConfig
+	client.path.breaker = newTestBreaker()
 	return client
 }
 
@@ -63,8 +70,8 @@ func TestMeteringClient_SendSync_Success(t *testing.T) {
 }
 
 func TestMeteringClient_Retry_OnServerError(t *testing.T) {
-	resilience.ResetGlobalCircuitBreaker()
-	defer resilience.ResetGlobalCircuitBreaker()
+	resilience.ResetCircuitBreakers()
+	defer resilience.ResetCircuitBreakers()
 
 	var attempts int32
 	var keys []string
@@ -96,8 +103,8 @@ func TestMeteringClient_Retry_OnServerError(t *testing.T) {
 }
 
 func TestMeteringClient_NoRetry_OnValidationError(t *testing.T) {
-	resilience.ResetGlobalCircuitBreaker()
-	defer resilience.ResetGlobalCircuitBreaker()
+	resilience.ResetCircuitBreakers()
+	defer resilience.ResetCircuitBreakers()
 
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,8 +123,8 @@ func TestMeteringClient_NoRetry_OnValidationError(t *testing.T) {
 }
 
 func TestMeteringClient_Retry_OnThrottled(t *testing.T) {
-	resilience.ResetGlobalCircuitBreaker()
-	defer resilience.ResetGlobalCircuitBreaker()
+	resilience.ResetCircuitBreakers()
+	defer resilience.ResetCircuitBreakers()
 
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,8 +245,8 @@ func TestMeteringClient_ToolEvent_IdempotencyKey_Override(t *testing.T) {
 }
 
 func TestMeteringClient_ToolEvent_RetryReusesIdempotencyKey(t *testing.T) {
-	resilience.ResetGlobalCircuitBreaker()
-	defer resilience.ResetGlobalCircuitBreaker()
+	resilience.ResetCircuitBreakers()
+	defer resilience.ResetCircuitBreakers()
 
 	var keys []string
 	var mu sync.Mutex
@@ -266,4 +273,11 @@ func TestMeteringClient_ToolEvent_RetryReusesIdempotencyKey(t *testing.T) {
 	require.Len(t, keys, 2)
 	assert.Equal(t, keys[0], keys[1])
 	assert.NotEmpty(t, keys[0])
+}
+
+func holdUsageRecord(t *testing.T, client *MeteringClient, payload *MeteringPayload) {
+	t.Helper()
+	record, err := client.encodeUsageRecord(payload)
+	require.NoError(t, err)
+	client.buffer.Push(record)
 }

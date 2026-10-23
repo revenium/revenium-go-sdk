@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/revenium/revenium-go-sdk/core"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
 type ResponsesInterface struct {
@@ -21,19 +23,22 @@ type ResponsesInterface struct {
 func (r *ResponsesInterface) Create(ctx context.Context, params responses.ResponseNewParams) (*responses.Response, error) {
 	metadata := core.GetUsageMetadata(ctx)
 	model := string(params.Model)
-	providerStr := r.provider.String()
+	if err := r.parent.checkCostControls(ctx, model, r.provider, true); err != nil {
+		core.Debug("Responses.Create blocked by enforcement: %v", err)
+		return nil, err
+	}
 	requestTime := time.Now()
 
 	resp, err := r.client.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := r.buildErrorPayload(model, metadata, duration, providerStr, requestTime, err.Error())
-		r.parent.metering.Send(payload)
+		r.parent.metering.Send(chatFailureRecord(r.provider, model, metadata, false, requestTime, duration, err))
 		return nil, err
 	}
 
 	duration := time.Since(requestTime)
-	payload := r.buildResponsePayload(resp, metadata, duration, providerStr, requestTime, nil)
+	payload := r.buildResponsePayload(resp, model, metadata, duration, r.provider, requestTime, nil)
+	applyResponsesCapture(payload, metadata, params, resp)
 	r.parent.metering.Send(payload)
 
 	return resp, nil
@@ -42,8 +47,12 @@ func (r *ResponsesInterface) Create(ctx context.Context, params responses.Respon
 func (r *ResponsesInterface) CreateStreaming(ctx context.Context, params responses.ResponseNewParams) (*ResponsesStreamingWrapper, error) {
 	metadata := core.GetUsageMetadata(ctx)
 	model := string(params.Model)
+	if err := r.parent.checkCostControls(ctx, model, r.provider, true); err != nil {
+		core.Debug("Responses.CreateStreaming blocked by enforcement: %v", err)
+		return nil, err
+	}
 
-	startTime := time.Now()
+	clock := startStreamClock()
 	stream := r.client.NewStreaming(ctx, params)
 
 	streamMetadata := make(map[string]interface{})
@@ -54,14 +63,16 @@ func (r *ResponsesInterface) CreateStreaming(ctx context.Context, params respons
 	}
 
 	return &ResponsesStreamingWrapper{
-		stream:    stream,
-		config:    r.config,
-		metadata:  streamMetadata,
-		startTime: startTime,
-		iface:     r,
-		model:     model,
-		provider:  r.provider.String(),
-		parent:    r.parent,
+		stream:   stream,
+		config:   r.config,
+		metadata: streamMetadata,
+		clock:    clock,
+		iface:    r,
+		model:    model,
+		provider: r.provider,
+		parent:   r.parent,
+		params:   params,
+		reply:    metering.ReplyCollectorFor(streamMetadata),
 	}, nil
 }
 
@@ -70,13 +81,7 @@ type streamTiming struct {
 	completionStartTime *time.Time
 }
 
-func (r *ResponsesInterface) buildResponsePayload(resp *responses.Response, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, stream *streamTiming) *metering.MeteringPayload {
-	inputTokens := resp.Usage.InputTokens
-	outputTokens := resp.Usage.OutputTokens
-	totalTokens := resp.Usage.TotalTokens
-	reasoningTokens := resp.Usage.OutputTokensDetails.ReasoningTokens
-	cachedTokens := resp.Usage.InputTokensDetails.CachedTokens
-
+func (r *ResponsesInterface) buildResponsePayload(resp *responses.Response, requestedModel string, md map[string]interface{}, duration time.Duration, provider Provider, requestTime time.Time, stream *streamTiming) *metering.MeteringPayload {
 	timeToFirstToken := int64(0)
 	var completionStartTime *time.Time
 	if stream != nil {
@@ -84,65 +89,107 @@ func (r *ResponsesInterface) buildResponsePayload(resp *responses.Response, md m
 		completionStartTime = stream.completionStartTime
 	}
 
-	payload := metering.NewPayload(metering.OperationChat, string(resp.Model), provider).
+	builder := responseTokenUsage(resp.Usage).chatRecord(provider, servedOrRequested(string(resp.Model), requestedModel)).
 		WithTiming(requestTime, duration).
-		WithTokens(inputTokens, outputTokens, totalTokens).
-		WithReasoningTokens(reasoningTokens, 0, cachedTokens).
 		WithStreaming(stream != nil, timeToFirstToken, completionStartTime).
-		WithStopReason(mapResponseStopReason(resp)).
-		Build()
-
+		WithStopReason(mapResponseStopReason(resp))
+	payload := builder.Build()
+	if resp.Status == responses.ResponseStatusFailed {
+		metering.ApplyFailedCall(payload, responseFailure(resp.Error), md)
+		return payload
+	}
 	metering.ApplyMetadata(payload, md)
 	return payload
 }
 
-func (r *ResponsesInterface) buildErrorPayload(model string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
-	payload := metering.NewPayload(metering.OperationChat, model, provider).
-		WithTiming(requestTime, duration).
-		WithError(errorReason).
-		Build()
-
-	metering.ApplyMetadata(payload, md)
-	return payload
+// responseFailure names a failed response by its code. The message is the
+// provider's own text, which can quote the request.
+func responseFailure(failure responses.ResponseError) metering.CallFailure {
+	kind := core.ErrorKindFrom(string(failure.Code))
+	if kind == "" {
+		kind = "response_failed"
+	}
+	message := failure.Message
+	if message == "" {
+		message = "response failed"
+	}
+	return metering.CallFailure{Err: errors.New(message), Kind: kind, ProviderReply: true}
 }
 
 type ResponsesStreamingWrapper struct {
-	stream    *ssestream.Stream[responses.ResponseStreamEventUnion]
-	config    *Config
-	metadata  map[string]interface{}
-	startTime time.Time
-	iface     *ResponsesInterface
-	model     string
-	provider  string
-	parent    *ReveniumOpenAI
-	mu        sync.Mutex
+	stream   *ssestream.Stream[responses.ResponseStreamEventUnion]
+	config   *Config
+	metadata map[string]interface{}
+	clock    streamClock
+	iface    *ResponsesInterface
+	model    string
+	provider Provider
+	parent   *ReveniumOpenAI
+	mu       sync.Mutex
+	closed   bool
 
-	firstTokenTime *time.Time
-	finalResponse  *responses.Response
+	finalResponse *responses.Response
+	params        responses.ResponseNewParams
+	reply         *prompt.ReplyCollector
 }
 
 func (sw *ResponsesStreamingWrapper) Next() bool {
-	return sw.stream.Next()
+	if !sw.stream.Next() {
+		sw.markExhausted()
+		return false
+	}
+	sw.captureEvent(sw.stream.Current())
+	return true
+}
+
+func (sw *ResponsesStreamingWrapper) markExhausted() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.clock.markExhausted()
 }
 
 func (sw *ResponsesStreamingWrapper) Current() responses.ResponseStreamEventUnion {
-	event := sw.stream.Current()
-	sw.captureEvent(event)
-	return event
+	return sw.stream.Current()
 }
 
 func (sw *ResponsesStreamingWrapper) captureEvent(event responses.ResponseStreamEventUnion) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if sw.firstTokenTime == nil && event.Type == "response.output_text.delta" {
-		now := time.Now()
-		sw.firstTokenTime = &now
+	sw.clock.observe(isOutputDeltaEvent(event), responseProgress(event))
+	if event.Type == "response.output_text.delta" {
+		sw.reply.Add(event.Delta)
 	}
 
-	if event.Type == "response.completed" {
+	if isFinalResponseEvent(event.Type) {
 		resp := event.Response
 		sw.finalResponse = &resp
+	}
+}
+
+func isOutputDeltaEvent(event responses.ResponseStreamEventUnion) bool {
+	switch event.Type {
+	case "response.output_text.delta", "response.refusal.delta", "response.function_call_arguments.delta",
+		"response.custom_tool_call_input.delta", "response.audio.delta", "response.audio.transcript.delta":
+		return event.Delta != ""
+	default:
+		return false
+	}
+}
+
+func responseProgress(event responses.ResponseStreamEventUnion) choiceProgress {
+	if isFinalResponseEvent(event.Type) {
+		return choiceProgress{0: true}
+	}
+	return nil
+}
+
+func isFinalResponseEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -151,37 +198,41 @@ func (sw *ResponsesStreamingWrapper) Err() error {
 }
 
 func (sw *ResponsesStreamingWrapper) Close() error {
-	err := sw.stream.Close()
-	streamErr := sw.stream.Err()
-	duration := time.Since(sw.startTime)
-
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if sw.closed {
+		return nil
+	}
+	sw.closed = true
+
+	err := sw.stream.Close()
+	streamErr := sw.stream.Err()
+	duration := sw.clock.duration()
+
 	if streamErr != nil {
-		payload := sw.iface.buildErrorPayload(sw.model, sw.metadata, duration, sw.provider, sw.startTime, streamErr.Error())
-		sw.parent.metering.Send(payload)
+		sw.parent.metering.Send(chatFailureRecord(sw.provider, sw.model, sw.metadata, true, sw.clock.start, duration, streamErr))
 		return err
 	}
 
-	timeToFirstToken := int64(0)
-	var completionStartTime *time.Time
-	if sw.firstTokenTime != nil {
-		timeToFirstToken = sw.firstTokenTime.Sub(sw.startTime).Milliseconds()
-		completionStartTime = sw.firstTokenTime
-	}
+	timeToFirstToken := sw.clock.timeToFirstToken()
+	completionStartTime := sw.clock.firstToken
 
 	if sw.finalResponse != nil {
 		timing := &streamTiming{timeToFirstToken: timeToFirstToken, completionStartTime: completionStartTime}
-		payload := sw.iface.buildResponsePayload(sw.finalResponse, sw.metadata, duration, sw.provider, sw.startTime, timing)
+		payload := sw.iface.buildResponsePayload(sw.finalResponse, sw.model, sw.metadata, duration, sw.provider, sw.clock.start, timing)
+		applyResponsesCapture(payload, sw.metadata, sw.params, sw.finalResponse)
 		sw.parent.metering.Send(payload)
 	} else {
-		payload := metering.NewPayload(metering.OperationChat, sw.model, sw.provider).
-			WithTiming(sw.startTime, duration).
+		payload := sw.provider.record(metering.OperationChat, sw.model).
+			WithTiming(sw.clock.start, duration).
 			WithStreaming(true, timeToFirstToken, completionStartTime).
 			Build()
 
 		metering.ApplyMetadata(payload, sw.metadata)
+		metering.ApplyChatCapture(payload, sw.metadata, func() metering.ChatCapture {
+			return responsesCapture(sw.params, "").WithStreamedReply(sw.reply)
+		})
 		sw.parent.metering.Send(payload)
 	}
 
@@ -191,6 +242,9 @@ func (sw *ResponsesStreamingWrapper) Close() error {
 func mapResponseStopReason(resp *responses.Response) string {
 	if resp.Status == "completed" && hasToolCallOutput(resp.Output) {
 		return "END_SEQUENCE"
+	}
+	if resp.Status == "incomplete" && resp.IncompleteDetails.Reason == "content_filter" {
+		return string(core.StopReasonError)
 	}
 	return mapResponseStatus(string(resp.Status))
 }
@@ -217,4 +271,11 @@ func mapResponseStatus(status string) string {
 	default:
 		return "END"
 	}
+}
+
+func applyResponsesCapture(payload *metering.MeteringPayload, metadata map[string]interface{}, params responses.ResponseNewParams, resp *responses.Response) {
+	if resp.Status == responses.ResponseStatusFailed {
+		return
+	}
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture { return responsesCapture(params, resp.OutputText()) })
 }

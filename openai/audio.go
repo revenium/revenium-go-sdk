@@ -8,6 +8,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
 
@@ -54,36 +55,33 @@ type TranscriptionsInterface struct {
 
 func (t *TranscriptionsInterface) Create(ctx context.Context, params openai.AudioTranscriptionNewParams) (*openai.AudioTranscriptionNewResponseUnion, error) {
 	metadata := core.GetUsageMetadata(ctx)
-	model := string(params.Model)
+	requestedModel := string(params.Model)
+	model := t.config.mediaModel(t.provider, requestedModel)
 	providerStr := t.provider.String()
+	if err := t.parent.enforcer.Check(enforcement.NewEvalContext(ctx, requestedModel, providerStr)); err != nil {
+		core.Debug("Audio.Transcriptions.Create blocked by enforcement: %v", err)
+		return nil, err
+	}
 	requestTime := time.Now()
 
 	resp, err := t.client.Audio.Transcriptions.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metering.SubtypeTranscription, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTranscription, metadata, duration, t.provider, requestTime, err)
 		t.parent.metering.Send(payload)
 		return nil, err
 	}
 
 	duration := time.Since(requestTime)
+	usage := parseAudioUsage(resp.RawJSON())
+	responseFormat := string(params.ResponseFormat)
 
-	attrs := map[string]interface{}{
-		"billing_unit":    "per_minute",
-		"language":        resp.Language,
-		"response_format": string(params.ResponseFormat),
-	}
-
-	builder := metering.NewPayload(metering.OperationAudio, model, providerStr).
+	builder := t.provider.mediaRecord(metering.OperationAudio, model).
 		WithTiming(requestTime, duration).
 		WithOperationSubtype(metering.SubtypeTranscription).
-		WithAttributes(attrs)
+		WithAudioDetails(metering.AudioDetails{Language: resp.Language, ResponseFormat: responseFormat})
 
-	if resp.Duration > 0 {
-		builder = builder.WithAudioDuration(resp.Duration)
-	}
-
-	payload := builder.Build()
+	payload := usage.applyTo(builder, model, metering.SubtypeTranscription, responseFormat).Build()
 	metering.ApplyMetadata(payload, metadata)
 	t.parent.metering.Send(payload)
 
@@ -99,31 +97,33 @@ type TranslationsInterface struct {
 
 func (t *TranslationsInterface) Create(ctx context.Context, params openai.AudioTranslationNewParams) (*openai.Translation, error) {
 	metadata := core.GetUsageMetadata(ctx)
-	model := string(params.Model)
+	requestedModel := string(params.Model)
+	model := t.config.mediaModel(t.provider, requestedModel)
 	providerStr := t.provider.String()
+	if err := t.parent.enforcer.Check(enforcement.NewEvalContext(ctx, requestedModel, providerStr)); err != nil {
+		core.Debug("Audio.Translations.Create blocked by enforcement: %v", err)
+		return nil, err
+	}
 	requestTime := time.Now()
 
-	resp, err := t.client.Audio.Translations.New(ctx, params)
+	resp, err := t.client.Audio.Translations.New(ctx, withDurationReporting(params))
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metering.SubtypeTranslation, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTranslation, metadata, duration, t.provider, requestTime, err)
 		t.parent.metering.Send(payload)
 		return nil, err
 	}
 
 	duration := time.Since(requestTime)
+	usage := parseAudioUsage(resp.RawJSON())
+	responseFormat := string(params.ResponseFormat)
 
-	attrs := map[string]interface{}{
-		"billing_unit":    "per_minute",
-		"target_language": "en",
-		"response_format": string(params.ResponseFormat),
-	}
-
-	payload := metering.NewPayload(metering.OperationAudio, model, providerStr).
+	builder := t.provider.mediaRecord(metering.OperationAudio, model).
 		WithTiming(requestTime, duration).
 		WithOperationSubtype(metering.SubtypeTranslation).
-		WithAttributes(attrs).
-		Build()
+		WithAudioDetails(metering.AudioDetails{TargetLanguage: "en", ResponseFormat: responseFormat})
+
+	payload := usage.applyTo(builder, model, metering.SubtypeTranslation, responseFormat).Build()
 
 	metering.ApplyMetadata(payload, metadata)
 	t.parent.metering.Send(payload)
@@ -140,14 +140,19 @@ type SpeechInterface struct {
 
 func (s *SpeechInterface) Create(ctx context.Context, params openai.AudioSpeechNewParams) (*http.Response, error) {
 	metadata := core.GetUsageMetadata(ctx)
-	model := string(params.Model)
+	requestedModel := string(params.Model)
+	model := s.config.mediaModel(s.provider, requestedModel)
 	providerStr := s.provider.String()
+	if err := s.parent.enforcer.Check(enforcement.NewEvalContext(ctx, requestedModel, providerStr)); err != nil {
+		core.Debug("Audio.Speech.Create blocked by enforcement: %v", err)
+		return nil, err
+	}
 	requestTime := time.Now()
 
 	resp, err := s.client.Audio.Speech.New(ctx, params)
 	if err != nil {
 		duration := time.Since(requestTime)
-		payload := buildAudioErrorPayload(model, metering.SubtypeTTS, metadata, duration, providerStr, requestTime, err.Error())
+		payload := buildAudioErrorPayload(model, metering.SubtypeTTS, metadata, duration, s.provider, requestTime, err)
 		s.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -159,18 +164,16 @@ func (s *SpeechInterface) Create(ctx context.Context, params openai.AudioSpeechN
 		speed = params.Speed.Value
 	}
 
-	attrs := map[string]interface{}{
-		"billing_unit":              "per_character",
-		"requested_character_count": utf8.RuneCountInString(params.Input),
-		"voice":                     audioVoiceLabel(params.Voice),
-		"speed":                     speed,
-		"response_format":           string(params.ResponseFormat),
-	}
-
-	payload := metering.NewPayload(metering.OperationAudio, model, providerStr).
+	payload := s.provider.mediaRecord(metering.OperationAudio, model).
 		WithTiming(requestTime, duration).
 		WithOperationSubtype(metering.SubtypeTTS).
-		WithAttributes(attrs).
+		WithBillingUnit(metering.BillingPerCharacter).
+		WithCharacterCount(int64(utf8.RuneCountInString(params.Input))).
+		WithAudioDetails(metering.AudioDetails{
+			Voice:          audioVoiceLabel(params.Voice),
+			Speed:          &speed,
+			ResponseFormat: string(params.ResponseFormat),
+		}).
 		Build()
 
 	metering.ApplyMetadata(payload, metadata)
@@ -189,13 +192,9 @@ func audioVoiceLabel(voice openai.AudioSpeechNewParamsVoiceUnion) string {
 	return voice.OfString.Value
 }
 
-func buildAudioErrorPayload(model, subtype string, md map[string]interface{}, duration time.Duration, provider string, requestTime time.Time, errorReason string) *metering.MeteringPayload {
-	payload := metering.NewPayload(metering.OperationAudio, model, provider).
+func buildAudioErrorPayload(model, subtype string, md map[string]interface{}, duration time.Duration, provider Provider, requestTime time.Time, err error) *metering.MeteringPayload {
+	builder := provider.mediaRecord(metering.OperationAudio, model).
 		WithTiming(requestTime, duration).
-		WithOperationSubtype(subtype).
-		WithError(errorReason).
-		Build()
-
-	metering.ApplyMetadata(payload, md)
-	return payload
+		WithOperationSubtype(subtype)
+	return failedCallRecord(builder, err, md)
 }

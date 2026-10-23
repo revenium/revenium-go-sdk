@@ -3,6 +3,8 @@ package core
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"time"
 )
 
 // ErrorType represents the type of error that occurred
@@ -41,6 +43,7 @@ type ReveniumError struct {
 	Err        error
 	StatusCode int
 	Details    map[string]interface{}
+	RetryAfter time.Duration
 }
 
 // Error implements the error interface
@@ -223,6 +226,14 @@ func IsValidationError(err error) bool {
 func IsInternalError(err error) bool {
 	var revErr *ReveniumError
 	return errors.As(err, &revErr) && revErr.Type == ErrorTypeInternal
+}
+
+// IsClientRefusal reports whether a provider answered with a 4xx status. A provider that refuses a
+// request creates no job; a 5xx answer, such as a gateway timeout, or no answer at all, does not say
+// whether the provider created one and will bill it.
+func IsClientRefusal(err error) bool {
+	var revErr *ReveniumError
+	return errors.As(err, &revErr) && revErr.StatusCode >= http.StatusBadRequest && revErr.StatusCode < http.StatusInternalServerError
 }
 
 // IsReveniumError checks if an error is a ReveniumError

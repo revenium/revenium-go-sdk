@@ -9,18 +9,35 @@ import (
 
 func TestExtractMetadataFromHeaders_AllFields(t *testing.T) {
 	h := http.Header{}
-	h.Set("X-Revenium-Subscriber-Id", "sub-1")
 	h.Set("X-Revenium-Product-Name", "prod-a")
 	h.Set("X-Revenium-Trace-Id", "trace-xyz")
 	h.Set("X-Revenium-Retry-Number", "3")
 	h.Set("X-Revenium-Capture-Prompts", "true")
 
 	md := ExtractMetadataFromHeaders(h)
-	assert.Equal(t, "sub-1", md["subscriberId"])
 	assert.Equal(t, "prod-a", md["productName"])
 	assert.Equal(t, "trace-xyz", md["traceId"])
 	assert.Equal(t, 3, md["retryNumber"])
-	assert.Equal(t, true, md["capturePrompts"])
+}
+
+func TestExtractMetadataFromHeaders_NeverReturnsTheCaptureSwitch(t *testing.T) {
+	for _, value := range []string{"true", "TRUE", "false"} {
+		h := http.Header{}
+		h.Set("X-Revenium-Capture-Prompts", value)
+		h.Set("X-Revenium-Agent", "agent-x")
+
+		md := ExtractMetadataFromHeaders(h)
+
+		assert.NotContains(t, md, "capturePrompts", "header value %q", value)
+		assert.Equal(t, "agent-x", md["agent"])
+	}
+}
+
+func TestExtractMetadataFromHeaders_CaptureHeaderAloneGivesNoMetadata(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Revenium-Capture-Prompts", "true")
+
+	assert.Nil(t, ExtractMetadataFromHeaders(h))
 }
 
 func TestExtractMetadataFromHeaders_NilAndEmpty(t *testing.T) {

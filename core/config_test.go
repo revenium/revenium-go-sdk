@@ -114,3 +114,26 @@ func TestNormalizeReveniumBaseURL(t *testing.T) {
 func TestDefaultReveniumBaseURL(t *testing.T) {
 	assert.Equal(t, "https://api.revenium.ai", DefaultReveniumBaseURL)
 }
+
+func TestBufferMaxBytes(t *testing.T) {
+	cases := map[string]int64{
+		"":           DefaultBufferMaxBytes,
+		"2000000":    2000000,
+		" 2000000 ":  2000000,
+		"0":          DefaultBufferMaxBytes,
+		"-5":         DefaultBufferMaxBytes,
+		"10MB":       DefaultBufferMaxBytes,
+		"1.5":        DefaultBufferMaxBytes,
+		"9999999999": 9999999999,
+	}
+	for raw, want := range cases {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv(EnvBufferMaxBytes, raw)
+			assert.Equal(t, want, BufferMaxBytes())
+		})
+	}
+}
+
+func TestDefaultBufferMaxBytesIs100MiB(t *testing.T) {
+	assert.Equal(t, int64(104857600), DefaultBufferMaxBytes)
+}

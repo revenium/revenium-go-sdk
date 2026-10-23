@@ -1,0 +1,48 @@
+package openai
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestReadmeNamesOpenAICallsThatAreNotRecorded(t *testing.T) {
+	section := unrecordedCallsSection(t, "OpenAI")
+	for _, surface := range []string{"`GetOpenAIClient()`", "`Videos`", "`Batches`", "`Images.GenerateStreaming`", "`Images.EditStreaming`", "`Audio.Transcriptions.NewStreaming`", "`Responses.Compact`", "`Responses.Connect`", "`Realtime`", "`FineTuning`"} {
+		assert.Contains(t, section, surface)
+	}
+}
+
+func unrecordedCallsSection(t *testing.T, provider string) string {
+	t.Helper()
+	section := callsNotRecordedIn(t, "README.md")
+	require.Equal(t, section, callsNotRecordedIn(t, "llms-full.txt"),
+		"README.md and llms-full.txt must list the same calls as not recorded")
+	intro, providerParts, _ := strings.Cut(section, "\n### ")
+	_, providerPart, found := strings.Cut("\n### "+providerParts, "\n### "+provider+"\n")
+	require.True(t, found, "the section must have a part for %s", provider)
+	providerPart, _, _ = strings.Cut(providerPart, "\n### ")
+	return strings.Join(strings.Fields(intro+" "+providerPart), " ")
+}
+
+func callsNotRecordedIn(t *testing.T, document string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("..", document))
+	require.NoError(t, err)
+	_, section, found := strings.Cut(string(content), "\n## Calls That Are Not Recorded\n")
+	require.True(t, found, "%s must have a section listing the calls that are not recorded", document)
+	section, _, _ = strings.Cut(section, "\n## ")
+	return section
+}
+
+func TestReadmeNoLongerClaimsEveryCallIsRecorded(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "README.md"))
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(readme), "Every API call is intercepted")
+	assert.NotContains(t, string(readme), "underlying wrapped `openai.Client`")
+}

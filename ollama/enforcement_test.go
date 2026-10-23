@@ -1,0 +1,113 @@
+package ollama
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
+	"github.com/revenium/revenium-go-sdk/core/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type ollamaProviderStub struct {
+	server *httptest.Server
+	hits   atomic.Int32
+}
+
+func newOllamaProviderStub(t *testing.T) *ollamaProviderStub {
+	t.Helper()
+	stub := &ollamaProviderStub{}
+	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stub.hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"llama3",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	}))
+	t.Cleanup(stub.server.Close)
+	return stub
+}
+
+func newEnforcedOllama(t *testing.T, providerURL, rulesURL, meteringURL, teamID string) *ReveniumOllama {
+	t.Helper()
+	r, err := NewReveniumOllama(&Config{
+		BaseURL: providerURL,
+		Revenium: &core.ReveniumConfig{
+			APIKey:             "hak_test_key_123",
+			BaseURL:            meteringURL,
+			EnforcementBaseURL: rulesURL,
+			TeamID:             teamID,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	return r
+}
+
+func asSubscriber(email string) context.Context {
+	return core.WithSubscriber(context.Background(), &core.Subscriber{Email: email})
+}
+
+func TestChatCompletions_PerPersonCapBlocksOnlyThePersonOverIt(t *testing.T) {
+	enforcement.Stop()
+	t.Cleanup(enforcement.Stop)
+	provider := newOllamaProviderStub(t)
+	rules := testutil.NewMockRulesServer()
+	t.Cleanup(rules.Close)
+	metering := testutil.NewMockMeteringServer()
+	t.Cleanup(metering.Close)
+	rules.SetPayload("team-a", `{"rules": [{"ruleId": 7, "name": "per-dev", "metricType": "TOTAL_COST", "threshold": 50,
+		"currentValue": 61, "breached": true, "shadowMode": false, "action": "BLOCK", "groupBy": "SUBSCRIBER",
+		"filters": [{"dimension": "PROVIDER", "operator": "IS", "value": "Ollama"}],
+		"groupBreakdown": [
+			{"groupValue": "alice@example.com", "currentValue": 61, "breached": true},
+			{"groupValue": "bob@example.com", "currentValue": 3, "breached": false}]}]}`)
+
+	client := newEnforcedOllama(t, provider.server.URL, rules.URL(), metering.URL(), "team-a")
+
+	_, err := client.ChatCompletions(asSubscriber("Alice@Example.com"), ChatCompletionRequest{
+		Model:    "llama3",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	var ece *enforcement.ErrCostLimitExceeded
+	require.True(t, errors.As(err, &ece), "alice should be blocked, got %v", err)
+	assert.Equal(t, int32(0), provider.hits.Load())
+
+	_, err = client.ChatCompletions(asSubscriber("bob@example.com"), ChatCompletionRequest{
+		Model:    "llama3",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), provider.hits.Load())
+}
+
+func TestChatCompletions_EachClientEnforcesItsOwnTeamsRules(t *testing.T) {
+	enforcement.Stop()
+	t.Cleanup(enforcement.Stop)
+	provider := newOllamaProviderStub(t)
+	rules := testutil.NewMockRulesServer()
+	t.Cleanup(rules.Close)
+	metering := testutil.NewMockMeteringServer()
+	t.Cleanup(metering.Close)
+	rules.SetPayload("team-b", `{"rules": [{"ruleId": 4211, "threshold": 10, "currentValue": 12, "breached": true,
+		"shadowMode": false, "action": "BLOCK", "filters": []}]}`)
+
+	unblocked := newEnforcedOllama(t, provider.server.URL, rules.URL(), metering.URL(), "team-a")
+	blockedTeam := newEnforcedOllama(t, provider.server.URL, rules.URL(), metering.URL(), "team-b")
+	req := ChatCompletionRequest{Model: "llama3", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+
+	_, err := unblocked.ChatCompletions(asSubscriber("alice@example.com"), req)
+	require.NoError(t, err)
+
+	_, err = blockedTeam.ChatCompletions(asSubscriber("alice@example.com"), req)
+	var ece *enforcement.ErrCostLimitExceeded
+	require.True(t, errors.As(err, &ece), "team-b's client should be blocked, got %v", err)
+	assert.Equal(t, "4211", ece.RuleID)
+	assert.Equal(t, int32(1), provider.hits.Load())
+}

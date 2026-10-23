@@ -137,3 +137,85 @@ func TestExtractMetadata(t *testing.T) {
 
 	assert.Equal(t, expected, result)
 }
+
+func TestGetUsageMetadata_CarriesTypedSubscriber(t *testing.T) {
+	ctx := WithSubscriber(context.Background(), &Subscriber{
+		ID:     "user-42",
+		Email:  "user@example.com",
+		APIKey: "sk-secret",
+	})
+
+	metadata := GetUsageMetadata(ctx)
+
+	assert.Equal(t, map[string]interface{}{"id": "user-42", "email": "user@example.com"}, metadata["subscriber"])
+}
+
+func TestGetUsageMetadata_TypedSubscriberWinsOverMetadataSubscriber(t *testing.T) {
+	ctx := WithUsageMetadata(context.Background(), map[string]interface{}{
+		"traceId":    "trace-1",
+		"subscriber": map[string]interface{}{"id": "map-user", "email": "map@example.com"},
+	})
+	ctx = WithSubscriber(ctx, &Subscriber{ID: "typed-user", Email: "typed@example.com"})
+
+	metadata := GetUsageMetadata(ctx)
+
+	assert.Equal(t, map[string]interface{}{"id": "typed-user", "email": "typed@example.com"}, metadata["subscriber"])
+	assert.Equal(t, "trace-1", metadata["traceId"])
+	assert.Equal(t, "typed-user", GetSubscriber(ctx).ID)
+}
+
+func TestGetUsageMetadata_DoesNotModifyCallerMap(t *testing.T) {
+	callerMap := map[string]interface{}{
+		"subscriber": map[string]interface{}{"id": "map-user"},
+	}
+	ctx := WithUsageMetadata(context.Background(), callerMap)
+	ctx = WithSubscriber(ctx, &Subscriber{ID: "typed-user"})
+
+	_ = GetUsageMetadata(ctx)
+
+	assert.Equal(t, map[string]interface{}{"id": "map-user"}, callerMap["subscriber"])
+}
+
+func TestGetUsageMetadata_TypedSubscriberWithoutIdentityLeavesMetadataSubscriber(t *testing.T) {
+	ctx := WithUsageMetadata(context.Background(), map[string]interface{}{
+		"subscriber": map[string]interface{}{"id": "map-user"},
+	})
+	ctx = WithSubscriber(ctx, &Subscriber{APIKey: "sk-only"})
+
+	assert.Equal(t, map[string]interface{}{"id": "map-user"}, GetUsageMetadata(ctx)["subscriber"])
+	assert.Equal(t, "map-user", GetSubscriber(ctx).ID)
+}
+
+func TestGetUsageMetadata_TypedSubscriberEmailOnly(t *testing.T) {
+	ctx := WithSubscriber(context.Background(), &Subscriber{Email: "only@example.com"})
+
+	assert.Equal(t, map[string]interface{}{"email": "only@example.com"}, GetUsageMetadata(ctx)["subscriber"])
+}
+
+func TestGetSubscriber_FallsBackToMetadataSubscriber(t *testing.T) {
+	ctx := WithUsageMetadata(context.Background(), map[string]interface{}{
+		"subscriber": map[string]interface{}{"id": "map-user", "email": "map@example.com"},
+	})
+
+	subscriber := GetSubscriber(ctx)
+
+	assert.Equal(t, &Subscriber{ID: "map-user", Email: "map@example.com"}, subscriber)
+}
+
+func TestGetSubscriber_KeepsTypedSubscriberWithoutIdentityWhenNothingElseIsSet(t *testing.T) {
+	typed := &Subscriber{APIKey: "sk-only"}
+	ctx := WithSubscriber(context.Background(), typed)
+
+	assert.Same(t, typed, GetSubscriber(ctx))
+	assert.NotContains(t, GetUsageMetadata(ctx), "subscriber")
+}
+
+func TestApplySubscriber_ReturnsInputWhenNoTypedSubscriber(t *testing.T) {
+	assert.Nil(t, ApplySubscriber(context.Background(), nil))
+}
+
+func TestApplySubscriber_BuildsMetadataFromNil(t *testing.T) {
+	ctx := WithSubscriber(context.Background(), &Subscriber{ID: "typed-user"})
+
+	assert.Equal(t, map[string]interface{}{"subscriber": map[string]interface{}{"id": "typed-user"}}, ApplySubscriber(ctx, nil))
+}

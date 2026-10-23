@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
 
@@ -69,80 +70,63 @@ type ReveniumOllama struct {
 	mu       sync.RWMutex
 	client   *http.Client
 	metering *metering.MeteringClient
+	enforcer *enforcement.Engine
 }
 
-var (
-	globalClient *ReveniumOllama
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumOllama", func(c *ReveniumOllama) *core.ReveniumConfig { return c.config.Revenium })
 
 // Initialize sets up the global Revenium middleware with configuration
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
-	core.InitializeLogger()
-	core.Info("Initializing Revenium middleware for Ollama...")
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumOllama, error) {
+		return buildSharedClient(cfg)
+	})
+}
+
+func buildSharedClient(cfg *Config) (*ReveniumOllama, error) {
+	core.InitializeLogger()
+	core.Info("Initializing Revenium middleware for Ollama...")
 
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	globalClient = &ReveniumOllama{
+	candidate := &ReveniumOllama{
 		config:   cfg,
 		provider: provider,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}
 
-	initialized = true
 	core.Info("Revenium middleware initialized successfully (Ollama at %s)", cfg.BaseURL)
-	return nil
+	return candidate, nil
 }
 
 // IsInitialized checks if the middleware is properly initialized
 func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
+	return sharedClient.IsInitialized()
 }
 
 // GetClient returns the global Revenium client
 func GetClient() (*ReveniumOllama, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
+	return sharedClient.Get()
 }
 
 // NewReveniumOllama creates a new Revenium client with explicit configuration
@@ -150,6 +134,7 @@ func NewReveniumOllama(cfg *Config) (*ReveniumOllama, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if cfg.Revenium == nil || cfg.Revenium.APIKey == "" {
 		return nil, core.NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
@@ -157,10 +142,7 @@ func NewReveniumOllama(cfg *Config) (*ReveniumOllama, error) {
 
 	provider := DetectProvider(cfg)
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +154,7 @@ func NewReveniumOllama(cfg *Config) (*ReveniumOllama, error) {
 			Timeout: 120 * time.Second,
 		},
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
@@ -190,11 +173,21 @@ func (r *ReveniumOllama) GetProvider() Provider {
 }
 
 func (r *ReveniumOllama) ChatCompletions(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	if req.Stream {
+		return nil, ErrStreamingNotSupported
+	}
+
+	if err := r.enforcer.Check(enforcement.NewEvalContext(ctx, req.Model, "Ollama")); err != nil {
+		core.Debug("ChatCompletions blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	metadata := core.GetUsageMetadata(ctx)
 	startTime := time.Now()
 
 	resp, err := r.callOllamaAPI(ctx, req)
 	if err != nil {
+		r.recordFailure(req.Model, startTime, err, metadata)
 		return nil, err
 	}
 
@@ -219,10 +212,22 @@ func (r *ReveniumOllama) ChatCompletions(ctx context.Context, req ChatCompletion
 	}
 
 	metering.ApplyMetadata(payload, metadata)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture {
+		return metering.OpenAIChatCapture(req.Messages, completionReply(resp))
+	})
 
 	r.metering.Send(payload)
 
 	return resp, nil
+}
+
+func (r *ReveniumOllama) recordFailure(model string, startTime time.Time, err error, metadata map[string]interface{}) {
+	payload := metering.NewPayload(metering.OperationChat, model, "Ollama").
+		WithTiming(startTime, time.Since(startTime)).
+		WithModelSource("OLLAMA").
+		Build()
+	metering.ApplyFailedCall(payload, metering.FailureOf(err), metadata)
+	r.metering.Send(payload)
 }
 
 // callOllamaAPI calls the Ollama API with the given request
@@ -263,7 +268,7 @@ func (r *ReveniumOllama) callOllamaAPI(ctx context.Context, req ChatCompletionRe
 		return nil, core.NewProviderError(
 			fmt.Sprintf("Ollama API returned %d: %s", httpResp.StatusCode, string(body)),
 			nil,
-		)
+		).WithProviderAnswer(httpResp.StatusCode, body)
 	}
 
 	var resp ChatCompletionResponse
@@ -281,18 +286,18 @@ func (r *ReveniumOllama) Flush() {
 func (r *ReveniumOllama) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
 // Reset resets the global middleware state for testing
 func Reset() {
-	globalMu.Lock()
-	defer globalMu.Unlock()
+	_ = sharedClient.ResetAndClose()
+}
 
-	if globalClient != nil {
-		globalClient.Close()
-		globalClient = nil
+func completionReply(resp *ChatCompletionResponse) string {
+	if len(resp.Choices) == 0 {
+		return ""
 	}
-
-	initialized = false
+	return resp.Choices[0].Message.Content
 }

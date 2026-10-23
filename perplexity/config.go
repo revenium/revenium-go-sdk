@@ -83,7 +83,6 @@ func (c *Config) loadFromEnv() error {
 		}
 	}
 
-	core.SetGlobalDebug(c.Revenium.Debug)
 	core.Debug("Configuration loaded from environment")
 	return nil
 }

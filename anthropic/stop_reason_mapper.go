@@ -18,7 +18,7 @@ func MapStopReasonToRevenium(stopReason string) string {
 		return "END_SEQUENCE"
 	case "pause_turn":
 		return "END"
-	case "refusal":
+	case "refusal", "guardrail_intervened", "content_filtered", "malformed_model_output", "malformed_tool_use":
 		return "ERROR"
 	case "timeout":
 		return "TIMEOUT"

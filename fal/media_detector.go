@@ -96,6 +96,9 @@ func CorrectFromResponse(initial metering.OperationType, response map[string]int
 	if _, ok := response["images"]; ok {
 		return metering.OperationImage
 	}
+	if _, ok := response["image"].(map[string]interface{}); ok {
+		return metering.OperationImage
+	}
 	if usage, ok := response["usage"].(map[string]interface{}); ok && len(usage) > 0 {
 		return metering.OperationChat
 	}

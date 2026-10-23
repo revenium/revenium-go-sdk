@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
 )
 
@@ -14,86 +15,76 @@ type ReveniumFal struct {
 	config    *Config
 	falClient *FalClient
 	metering  *metering.MeteringClient
+	enforcer  *enforcement.Engine
 	mu        sync.RWMutex
 	enabled   atomic.Bool
+	abandoned core.BackgroundWaits
+	// operations holds the operation type each endpoint's last reply
+	// resolved to, so a call that gets no reply is recorded under the same
+	// type as that endpoint's successful calls.
+	operationsMu sync.RWMutex
+	operations   map[string]metering.OperationType
 }
 
-var (
-	globalClient *ReveniumFal
-	globalMu     sync.RWMutex
-	initialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumFal", func(c *ReveniumFal) *core.ReveniumConfig { return c.config.Revenium })
 
 func Initialize(opts ...Option) error {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if initialized {
-		return nil
-	}
-
-	core.InitializeLogger()
-	core.Info("Initializing Revenium Fal.ai middleware...")
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumFal, error) {
+		return buildSharedClient(cfg)
+	})
+}
+
+func buildSharedClient(cfg *Config) (*ReveniumFal, error) {
+	core.InitializeLogger()
+	core.Info("Initializing Revenium Fal.ai middleware...")
 
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	falClient, err := NewFalClient(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	globalClient = &ReveniumFal{
+	candidate := &ReveniumFal{
 		config:    cfg,
 		falClient: falClient,
 		metering:  mc,
+		enforcer:  enforcement.StartFor(cfg.Revenium),
 	}
-	globalClient.enabled.Store(true)
+	candidate.enabled.Store(true)
 
-	initialized = true
 	core.Info("Revenium Fal.ai middleware initialized successfully")
-	return nil
+	return candidate, nil
 }
 
 func IsInitialized() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return initialized
+	return sharedClient.IsInitialized()
 }
 
 func GetClient() (*ReveniumFal, error) {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-
-	if !initialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalClient, nil
+	return sharedClient.Get()
 }
 
 func NewReveniumFal(cfg *Config) (*ReveniumFal, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -104,10 +95,7 @@ func NewReveniumFal(cfg *Config) (*ReveniumFal, error) {
 		return nil, err
 	}
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +104,7 @@ func NewReveniumFal(cfg *Config) (*ReveniumFal, error) {
 		config:    cfg,
 		falClient: falClient,
 		metering:  mc,
+		enforcer:  enforcement.StartFor(cfg.Revenium),
 	}
 	client.enabled.Store(true)
 	return client, nil
@@ -183,19 +172,13 @@ func (r *ReveniumFal) Flush() {
 }
 
 func (r *ReveniumFal) Close() error {
+	r.abandoned.Stop()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
 func Reset() {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if globalClient != nil {
-		globalClient.Close()
-		globalClient = nil
-	}
-
-	initialized = false
+	_ = sharedClient.ResetAndClose()
 }

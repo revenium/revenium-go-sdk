@@ -16,8 +16,7 @@ func TestNewToolEvent_Defaults(t *testing.T) {
 	assert.Equal(t, "execute", p.Operation)
 	assert.True(t, p.Success)
 	assert.NotEmpty(t, p.TransactionID)
-	assert.NotEmpty(t, p.IdempotencyKey)
-	assert.NotEqual(t, p.TransactionID, p.IdempotencyKey)
+	assert.Equal(t, p.TransactionID, p.IdempotencyKey, "the Idempotency-Key names the same tool call as the transactionId")
 	assert.NotEmpty(t, p.Timestamp)
 	assert.Equal(t, int64(0), p.DurationMs)
 	assert.Empty(t, p.ErrorMessage)
@@ -143,7 +142,6 @@ func TestApplyToolEventMetadata_StringFields(t *testing.T) {
 		"subscriberCredential": "sub-789",
 		"workflowId":           "wf-1",
 		"traceId":              "trace-1",
-		"transactionId":        "custom-tx",
 	})
 
 	assert.Equal(t, "my-agent", p.Agent)
@@ -152,7 +150,6 @@ func TestApplyToolEventMetadata_StringFields(t *testing.T) {
 	assert.Equal(t, "sub-789", p.SubscriberCredential)
 	assert.Equal(t, "wf-1", p.WorkflowID)
 	assert.Equal(t, "trace-1", p.TraceID)
-	assert.Equal(t, "custom-tx", p.TransactionID)
 }
 
 func TestApplyToolEventMetadata_AliasFields(t *testing.T) {
@@ -229,7 +226,7 @@ func TestApplyToolEventMetadata_IdempotencyKey(t *testing.T) {
 	ApplyToolEventMetadata(p, map[string]interface{}{
 		"idempotencyKey": "meta-key-789",
 	})
-	assert.Equal(t, "meta-key-789", p.IdempotencyKey)
+	assert.Equal(t, p.TransactionID, p.IdempotencyKey, "shared metadata must not give several tool events one key")
 }
 
 func TestToolEventEndpoint(t *testing.T) {

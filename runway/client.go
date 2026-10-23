@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 )
 
 // RunwayClient is the HTTP client for interacting with Runway API
@@ -68,7 +69,11 @@ func (c *RunwayClient) GetTaskStatus(ctx context.Context, taskID string) (*TaskS
 	return &response, nil
 }
 
-// WaitForTaskCompletion polls a task until it completes or times out
+// WaitForTaskCompletion polls a task until it completes or times out. It
+// returns the status with a nil error when the task succeeded, the status
+// with a task error when Runway reports it FAILED or CANCELED, and a nil
+// status with an error when it stopped polling before Runway reported an
+// outcome.
 func (c *RunwayClient) WaitForTaskCompletion(ctx context.Context, taskID string, pollingConfig *PollingConfig) (*TaskStatusResponse, error) {
 	if pollingConfig == nil {
 		pollingConfig = DefaultPollingConfig()
@@ -101,9 +106,10 @@ func (c *RunwayClient) WaitForTaskCompletion(ctx context.Context, taskID string,
 		// Poll task status
 		status, err := c.GetTaskStatus(ctx, taskID)
 		if err != nil {
-			core.Warn("Failed to get task status (attempt %d): %v", attempts, err)
-			// Continue polling on transient errors
-			time.Sleep(interval)
+			core.Warn("Failed to get task status (attempt %d): %s", attempts, prompt.RedactedError(err))
+			if err := pauseUnlessDone(ctx, interval); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -124,14 +130,26 @@ func (c *RunwayClient) WaitForTaskCompletion(ctx context.Context, taskID string,
 			return status, NewTaskError("task was canceled", nil)
 		}
 
-		// Task is still pending or running, wait before next poll
-		time.Sleep(interval)
+		if err := pauseUnlessDone(ctx, interval); err != nil {
+			return nil, err
+		}
 
 		// Increase interval with exponential backoff (up to max)
 		interval = time.Duration(float64(interval) * 1.5)
 		if interval > pollingConfig.MaxInterval {
 			interval = pollingConfig.MaxInterval
 		}
+	}
+}
+
+func pauseUnlessDone(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -200,14 +218,15 @@ func (c *RunwayClient) doRequest(req *http.Request, result interface{}) error {
 			return core.NewProviderError(
 				fmt.Sprintf("Runway API error (%d): %s", resp.StatusCode, runwayError.Error.Message),
 				nil,
-			).WithDetails("code", runwayError.Error.Code).WithDetails("type", runwayError.Error.Type)
+			).WithDetails("code", runwayError.Error.Code).WithDetails("type", runwayError.Error.Type).
+				WithProviderAnswer(resp.StatusCode, bodyBytes)
 		}
 
 		// Generic error if we can't parse the response
 		return core.NewProviderError(
 			fmt.Sprintf("Runway API returned status %d: %s", resp.StatusCode, string(bodyBytes)),
 			nil,
-		)
+		).WithProviderAnswer(resp.StatusCode, bodyBytes)
 	}
 
 	// Decode successful response

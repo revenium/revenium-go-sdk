@@ -10,18 +10,21 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newTestFal(t *testing.T, falURL string) *ReveniumFal {
 	t.Helper()
+	revenium := testutil.NewMockMeteringServer()
+	t.Cleanup(revenium.Close)
 	cfg := &Config{
 		FalAPIKey:      "test-key",
 		FalBaseURL:     falURL,
 		QueueBaseURL:   falURL,
 		RequestTimeout: 10 * time.Second,
-		Revenium:       &core.ReveniumConfig{APIKey: "hak_test_key_123"},
+		Revenium:       &core.ReveniumConfig{APIKey: "hak_test_key_123", BaseURL: revenium.URL()},
 	}
 	client, err := NewReveniumFal(cfg)
 	require.NoError(t, err)

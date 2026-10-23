@@ -46,6 +46,7 @@ func TestCorrectFromResponse(t *testing.T) {
 		{"audio shape", metering.OperationImage, map[string]interface{}{"audio": map[string]interface{}{"url": "x"}}, metering.OperationAudio},
 		{"audio file_url mp3", metering.OperationVideo, map[string]interface{}{"file_url": "https://x.fal/x.mp3"}, metering.OperationAudio},
 		{"image shape", metering.OperationVideo, map[string]interface{}{"images": []interface{}{map[string]interface{}{"url": "x"}}}, metering.OperationImage},
+		{"single image shape", metering.OperationVideo, map[string]interface{}{"image": map[string]interface{}{"url": "x", "width": 1024}}, metering.OperationImage},
 		{"chat usage shape", metering.OperationImage, map[string]interface{}{"usage": map[string]interface{}{"total_tokens": 12}}, metering.OperationChat},
 		{"empty falls back", metering.OperationVideo, map[string]interface{}{}, metering.OperationVideo},
 	}

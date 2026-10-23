@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -16,13 +17,17 @@ import (
 )
 
 type StreamingResponse struct {
-	reader   io.ReadCloser
-	buffered *bufio.Reader
-	metadata map[string]interface{}
-	model    string
-	metering *metering.MeteringClient
-	enabled  bool
-	mu       sync.Mutex
+	reader      io.ReadCloser
+	buffered    *bufio.Reader
+	metadata    map[string]interface{}
+	model       string
+	servedModel string
+	deployment  string
+	headers     http.Header
+	metering    *metering.MeteringClient
+	enabled     bool
+	mu          sync.Mutex
+	closed      bool
 
 	current *StreamChunk
 	done    bool
@@ -34,6 +39,9 @@ type StreamingResponse struct {
 	reasoningTokens     int64
 	cacheReadTokens     int64
 	cacheCreationTokens int64
+	cacheCreation5m     *int64
+	cacheCreation1h     *int64
+	reportedCost        *float64
 
 	startTime      time.Time
 	firstTokenTime *time.Time
@@ -41,9 +49,10 @@ type StreamingResponse struct {
 	finishReason      string
 	systemFingerprint string
 
-	capturePrompts       bool
+	reconstructReply     bool
 	maxPromptSize        int
-	accumulatedContent   strings.Builder
+	reply                *prompt.ReplyCollector
+	messages             []ChatMessage
 	accumulatedToolCalls map[int]*toolCallAccumulator
 	responseID           string
 	responseCreated      int64
@@ -66,8 +75,9 @@ func newStreamingResponse(reader io.ReadCloser, metadata map[string]interface{},
 		model:                model,
 		metering:             mc,
 		enabled:              enabled,
-		capturePrompts:       prompt.ShouldCapturePrompts(metadata),
+		reconstructReply:     prompt.ShouldCapturePrompts(metadata),
 		maxPromptSize:        prompt.GetMaxPromptSize(),
+		reply:                metering.ReplyCollectorFor(metadata),
 		accumulatedToolCalls: map[int]*toolCallAccumulator{},
 	}
 	return s
@@ -93,7 +103,7 @@ func (s *StreamingResponse) Next() bool {
 			s.current = chunk
 			return true
 		}
-		if s.done {
+		if s.done || s.err != nil {
 			return false
 		}
 	}
@@ -129,31 +139,21 @@ func (s *StreamingResponse) Err() error {
 }
 
 func (s *StreamingResponse) Close() error {
-	closeErr := s.reader.Close()
-	duration := time.Since(s.startTime)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	modelName := ExtractModelName(s.model)
-	provider := ExtractProvider(s.model)
-	modelSource := ExtractModelSource(s.model)
-
-	if s.err != nil {
-		payload := metering.NewPayload(metering.OperationChat, modelName, provider).
-			WithTiming(s.startTime, duration).
-			WithTokens(0, 0, 0).
-			WithReasoningTokens(0, 0, 0).
-			WithStreaming(true, 0, nil).
-			WithModelSource(modelSource).
-			WithError(s.err.Error()).
-			Build()
-		metering.ApplyMetadata(payload, s.metadata)
-		if s.enabled {
-			s.metering.Send(payload)
-		}
-		return closeErr
+	if s.closed {
+		return nil
 	}
+	s.closed = true
+
+	closeErr := s.reader.Close()
+	duration := time.Since(s.startTime)
+
+	meteredModel := recordedModel(s.servedModel, s.model, s.deployment, s.headers)
+	modelName := ExtractModelName(meteredModel)
+	provider := ExtractProvider(meteredModel)
+	modelSource := ExtractModelSource(meteredModel)
 
 	timeToFirstToken := int64(0)
 	var completionStartTime *time.Time
@@ -170,14 +170,23 @@ func (s *StreamingResponse) Close() error {
 
 	payload := metering.NewPayload(metering.OperationChat, modelName, provider).
 		WithTiming(s.startTime, duration).
-		WithTokens(s.inputTokens, s.outputTokens, s.totalTokens).
+		WithTokens(billableInputTokens(meteredModel, s.inputTokens, s.cacheReadTokens, s.cacheCreationTokens), s.outputTokens, s.totalTokens).
 		WithReasoningTokens(s.reasoningTokens, s.cacheCreationTokens, s.cacheReadTokens).
+		WithCacheCreationByTTL(s.cacheCreation5m, s.cacheCreation1h).
+		WithCosts(nil, nil, nil, nil, reportedCost(s.reportedCost, s.headers)).
 		WithStreaming(true, timeToFirstToken, completionStartTime).
 		WithStopReason(stopReason).
 		WithModelSource(modelSource).
 		WithSystemFingerprint(s.systemFingerprint).
 		Build()
-	metering.ApplyMetadata(payload, s.metadata)
+	if s.err != nil {
+		metering.ApplyFailedCall(payload, metering.FailureOf(s.err), s.metadata)
+	} else {
+		metering.ApplyMetadata(payload, s.metadata)
+		metering.ApplyChatCapture(payload, s.metadata, func() metering.ChatCapture {
+			return metering.OpenAIChatCapture(s.messages, "").WithStreamedReply(s.reply)
+		})
+	}
 	if s.enabled {
 		s.metering.Send(payload)
 	}
@@ -204,6 +213,11 @@ func (s *StreamingResponse) processSSELine(line string) *StreamChunk {
 		return nil
 	}
 
+	if err := streamErrorEvent(data); err != nil {
+		s.err = err
+		return nil
+	}
+
 	var chunk StreamChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 		core.Debug("Failed to parse stream chunk: %v", err)
@@ -212,6 +226,18 @@ func (s *StreamingResponse) processSSELine(line string) *StreamChunk {
 
 	s.processChunkData(&chunk)
 	return &chunk
+}
+
+// streamErrorEvent is the error a proxy sends mid-stream as
+// data: {"error": ...}, which carries no chunk fields.
+func streamErrorEvent(data string) error {
+	var event struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal([]byte(data), &event) != nil || len(event.Error) == 0 || string(event.Error) == "null" {
+		return nil
+	}
+	return core.NewProviderError("LiteLLM proxy sent an error mid-stream: "+data, nil).WithProviderReply([]byte(data))
 }
 
 func (s *StreamingResponse) processChunkData(chunk *StreamChunk) {
@@ -223,6 +249,9 @@ func (s *StreamingResponse) processChunkData(chunk *StreamChunk) {
 	}
 	if s.responseCreated == 0 && chunk.Created != 0 {
 		s.responseCreated = chunk.Created
+	}
+	if s.servedModel == "" && chunk.Model != "" {
+		s.servedModel = chunk.Model
 	}
 
 	if s.firstTokenTime == nil && len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
@@ -249,15 +278,25 @@ func (s *StreamingResponse) processChunkData(chunk *StreamChunk) {
 		if cacheCreationTokens := usage.CacheCreationTokenCount(); cacheCreationTokens > 0 {
 			s.cacheCreationTokens = cacheCreationTokens
 		}
+		if fiveMinute, oneHour := usage.CacheCreationByTTL(); fiveMinute != nil || oneHour != nil {
+			s.cacheCreation5m, s.cacheCreation1h = fiveMinute, oneHour
+		}
+		if cost := usage.ReportedCost(); cost != nil {
+			s.reportedCost = cost
+		}
 	}
 
-	if len(chunk.Choices) > 0 {
-		choice := chunk.Choices[0]
+	for i := range chunk.Choices {
+		choice := &chunk.Choices[i]
+		if choice.Index != 0 {
+			continue
+		}
+		if s.reply != nil {
+			s.accumulateDelta(&choice.Delta)
+		}
 		if choice.FinishReason != "" {
 			s.finishReason = choice.FinishReason
-		}
-		if s.capturePrompts {
-			s.accumulateDelta(&choice.Delta)
+			s.reply.End()
 		}
 	}
 
@@ -270,16 +309,7 @@ func (s *StreamingResponse) accumulateDelta(delta *StreamDelta) {
 	if delta == nil {
 		return
 	}
-	if delta.Content != "" {
-		remaining := s.maxPromptSize - s.accumulatedContent.Len()
-		if remaining > 0 {
-			if len(delta.Content) <= remaining {
-				s.accumulatedContent.WriteString(delta.Content)
-			} else {
-				s.accumulatedContent.WriteString(delta.Content[:remaining])
-			}
-		}
-	}
+	s.reply.Add(delta.Content)
 	for _, tc := range delta.ToolCalls {
 		acc, ok := s.accumulatedToolCalls[tc.Index]
 		if !ok {
@@ -316,11 +346,11 @@ func (s *StreamingResponse) ReconstructResponse() *ChatCompletionResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.capturePrompts {
+	if !s.reconstructReply {
 		return nil
 	}
 
-	content := s.accumulatedContent.String()
+	content := prompt.TruncateString(s.reply.Text(), s.maxPromptSize)
 	if content == "" && len(s.accumulatedToolCalls) == 0 {
 		return nil
 	}
@@ -376,6 +406,7 @@ func (s *StreamingResponse) ReconstructResponse() *ChatCompletionResponse {
 			PromptTokens:     s.inputTokens,
 			CompletionTokens: s.outputTokens,
 			TotalTokens:      s.totalTokens,
+			Cost:             s.reportedCost,
 		},
 		SystemFingerprint: s.systemFingerprint,
 	}

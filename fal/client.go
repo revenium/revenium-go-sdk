@@ -96,9 +96,9 @@ func (c *FalClient) doRequest(ctx context.Context, method, fullURL string, body 
 		var falErr FalError
 		if err := json.Unmarshal(respBody, &falErr); err == nil && (falErr.ErrorText != "" || falErr.Message != "") {
 			falErr.Status = resp.StatusCode
-			return respBody, resp.Header, core.NewProviderError(fmt.Sprintf("Fal.ai API error: %s", falErr.Error()), &falErr)
+			return respBody, resp.Header, core.NewProviderError(fmt.Sprintf("Fal.ai API error: %s", falErr.Error()), &falErr).WithProviderAnswer(resp.StatusCode, respBody)
 		}
-		return respBody, resp.Header, core.NewProviderError(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(respBody, 256)), nil)
+		return respBody, resp.Header, core.NewProviderError(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(respBody, 256)), nil).WithProviderAnswer(resp.StatusCode, respBody)
 	}
 
 	return respBody, resp.Header, nil
@@ -135,7 +135,7 @@ func (c *FalClient) rawStream(ctx context.Context, method, fullURL string, body 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, resp.Header, core.NewProviderError(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(respBody, 256)), nil)
+		return nil, resp.Header, core.NewProviderError(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(respBody, 256)), nil).WithProviderAnswer(resp.StatusCode, respBody)
 	}
 
 	return resp.Body, resp.Header, nil

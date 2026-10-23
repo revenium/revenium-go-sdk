@@ -5,12 +5,12 @@ import "github.com/revenium/revenium-go-sdk/core"
 type OperationType string
 
 const (
-	OperationChat  OperationType = "CHAT"
+	OperationChat   OperationType = "CHAT"
 	OperationVision OperationType = "VISION"
-	OperationImage OperationType = "IMAGE"
-	OperationVideo OperationType = "VIDEO"
-	OperationAudio OperationType = "AUDIO"
-	OperationEmbed OperationType = "EMBED"
+	OperationImage  OperationType = "IMAGE"
+	OperationVideo  OperationType = "VIDEO"
+	OperationAudio  OperationType = "AUDIO"
+	OperationEmbed  OperationType = "EMBED"
 )
 
 func ToolEventEndpoint(baseURL string) string {

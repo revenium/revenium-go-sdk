@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"net/http"
 	"os"
 
 	"github.com/revenium/revenium-go-sdk/core"
@@ -14,11 +15,17 @@ type Config struct {
 
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
+	AWSSessionToken    string
 	AWSRegion          string
 	AWSProfile         string
 	AWSModelARNBase    string
 	BedrockDisabled    bool
 	BedrockUseConverse bool
+
+	BedrockFallbackToAnthropic bool
+
+	bedrockFallbackSetInCode bool
+	bedrockHTTPClient        *http.Client
 }
 
 type Option func(*Config)
@@ -65,6 +72,16 @@ func WithBedrockUseConverse(enabled bool) Option {
 	}
 }
 
+// WithBedrockFallbackToAnthropic re-sends a Bedrock call that fails to the
+// Anthropic API, where it is recorded as an Anthropic call. Off by default: a
+// failed Bedrock call returns its error.
+func WithBedrockFallbackToAnthropic(enabled bool) Option {
+	return func(c *Config) {
+		c.BedrockFallbackToAnthropic = enabled
+		c.bedrockFallbackSetInCode = true
+	}
+}
+
 func (c *Config) loadFromEnv() error {
 	core.LoadEnvFiles()
 
@@ -75,6 +92,9 @@ func (c *Config) loadFromEnv() error {
 
 	if c.AWSAccessKeyID == "" {
 		c.AWSAccessKeyID = os.Getenv("AWS_ACCESS_KEY_ID")
+		if c.AWSSessionToken == "" {
+			c.AWSSessionToken = os.Getenv("AWS_SESSION_TOKEN")
+		}
 	}
 	if c.AWSSecretAccessKey == "" {
 		c.AWSSecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -89,12 +109,16 @@ func (c *Config) loadFromEnv() error {
 		c.AWSModelARNBase = os.Getenv("AWS_MODEL_ARN_ID")
 	}
 
-	if os.Getenv("REVENIUM_BEDROCK_DISABLE") == "1" || os.Getenv("REVENIUM_BEDROCK_DISABLE") == "true" {
+	if core.IsEnvFlagSet("REVENIUM_BEDROCK_DISABLE") {
 		c.BedrockDisabled = true
 	}
 
-	if os.Getenv("REVENIUM_BEDROCK_USE_CONVERSE") == "1" || os.Getenv("REVENIUM_BEDROCK_USE_CONVERSE") == "true" {
+	if core.IsEnvFlagSet("REVENIUM_BEDROCK_USE_CONVERSE") {
 		c.BedrockUseConverse = true
+	}
+
+	if !c.bedrockFallbackSetInCode && !c.BedrockFallbackToAnthropic {
+		c.BedrockFallbackToAnthropic = core.IsEnvFlagSet("REVENIUM_BEDROCK_FALLBACK_TO_ANTHROPIC")
 	}
 
 	core.InitializeLogger()

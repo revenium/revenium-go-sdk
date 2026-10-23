@@ -91,9 +91,10 @@ type Choice struct {
 }
 
 type Usage struct {
-	PromptTokens            int                              `json:"prompt_tokens"`
-	CompletionTokens        int                              `json:"completion_tokens"`
-	TotalTokens             int                              `json:"total_tokens"`
-	PromptTokensDetails     *metering.PromptTokensDetails    `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int                               `json:"prompt_tokens"`
+	CompletionTokens        int                               `json:"completion_tokens"`
+	TotalTokens             int                               `json:"total_tokens"`
+	PromptTokensDetails     *metering.PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *metering.CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	CostInUSDTicks          *int64                            `json:"cost_in_usd_ticks,omitempty"`
 }

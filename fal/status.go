@@ -27,26 +27,21 @@ func (r *ReveniumFal) IsEnabled() bool {
 }
 
 func GetStatus() MiddlewareStatus {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient == nil {
+	client, ok := sharedClient.Current()
+	if !ok {
 		return MiddlewareStatus{}
 	}
-	return globalClient.GetStatus()
+	return client.GetStatus()
 }
 
 func Enable() {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient != nil {
-		globalClient.Enable()
+	if client, ok := sharedClient.Current(); ok {
+		client.Enable()
 	}
 }
 
 func Disable() {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalClient != nil {
-		globalClient.Disable()
+	if client, ok := sharedClient.Current(); ok {
+		client.Disable()
 	}
 }

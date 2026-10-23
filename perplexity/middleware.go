@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/revenium/revenium-go-sdk/core"
+	"github.com/revenium/revenium-go-sdk/core/enforcement"
 	"github.com/revenium/revenium-go-sdk/core/metering"
+	"github.com/revenium/revenium-go-sdk/core/prompt"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -25,27 +27,22 @@ type ReveniumPerplexity struct {
 	config   *Config
 	mu       sync.RWMutex
 	metering *metering.MeteringClient
+	enforcer *enforcement.Engine
 }
 
-var (
-	globalPerplexityClient *ReveniumPerplexity
-	globalPerplexityMu     sync.RWMutex
-	perplexityInitialized  bool
-)
+var sharedClient = core.NewSharedClient("NewReveniumPerplexity", func(c *ReveniumPerplexity) *core.ReveniumConfig { return c.config.Revenium })
 
 func Initialize(opts ...Option) error {
-	globalPerplexityMu.Lock()
-	defer globalPerplexityMu.Unlock()
-
-	if perplexityInitialized {
-		return nil
-	}
-
 	cfg := &Config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return sharedClient.Initialize(core.NamedAccount(cfg.Revenium), func() (*ReveniumPerplexity, error) {
+		return buildSharedClient(cfg)
+	})
+}
 
+func buildSharedClient(cfg *Config) (*ReveniumPerplexity, error) {
 	if err := cfg.loadFromEnv(); err != nil {
 		core.Warn("Failed to load configuration from environment: %v", err)
 	}
@@ -53,52 +50,41 @@ func Initialize(opts ...Option) error {
 	core.Info("Initializing Revenium Perplexity middleware...")
 
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	clientOpts := buildPerplexityClientOptions(cfg)
 	openaiClient := openai.NewClient(clientOpts...)
 
-	globalPerplexityClient = &ReveniumPerplexity{
+	candidate := &ReveniumPerplexity{
 		client:   openaiClient,
 		config:   cfg,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}
 
-	perplexityInitialized = true
 	core.Info("Revenium Perplexity middleware initialized successfully")
-	return nil
+	return candidate, nil
 }
 
 func IsInitialized() bool {
-	globalPerplexityMu.RLock()
-	defer globalPerplexityMu.RUnlock()
-	return perplexityInitialized
+	return sharedClient.IsInitialized()
 }
 
 func GetClient() (*ReveniumPerplexity, error) {
-	globalPerplexityMu.RLock()
-	defer globalPerplexityMu.RUnlock()
-
-	if !perplexityInitialized {
-		return nil, core.NewConfigError("middleware not initialized, call Initialize() first", nil)
-	}
-
-	return globalPerplexityClient, nil
+	return sharedClient.Get()
 }
 
 func NewReveniumPerplexity(cfg *Config) (*ReveniumPerplexity, error) {
 	if cfg == nil {
 		return nil, core.NewConfigError("config cannot be nil", nil)
 	}
+	core.TrimReveniumConfig(cfg.Revenium)
 
 	if cfg.Revenium == nil || cfg.Revenium.APIKey == "" {
 		return nil, core.NewConfigError("REVENIUM_METERING_API_KEY is required", nil)
@@ -108,10 +94,7 @@ func NewReveniumPerplexity(cfg *Config) (*ReveniumPerplexity, error) {
 		return nil, err
 	}
 
-	mc, err := metering.NewMeteringClient(metering.MeteringClientConfig{
-		APIKey:  cfg.Revenium.APIKey,
-		BaseURL: cfg.Revenium.BaseURL,
-	})
+	mc, err := metering.NewMeteringClient(metering.ClientConfigFor(cfg.Revenium))
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +106,7 @@ func NewReveniumPerplexity(cfg *Config) (*ReveniumPerplexity, error) {
 		client:   openaiClient,
 		config:   cfg,
 		metering: mc,
+		enforcer: enforcement.StartFor(cfg.Revenium),
 	}, nil
 }
 
@@ -146,6 +130,8 @@ func (r *ReveniumPerplexity) GetConfig() *Config {
 	return r.config
 }
 
+// GetOpenAIClient returns the provider's own client. Calls made through it are
+// neither recorded nor checked against cost controls.
 func (r *ReveniumPerplexity) GetOpenAIClient() openai.Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -172,6 +158,7 @@ func (r *ReveniumPerplexity) Flush() {
 func (r *ReveniumPerplexity) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.enforcer.Release()
 	return r.metering.Close()
 }
 
@@ -197,6 +184,12 @@ type CompletionsInterface struct {
 
 func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatCompletionNewParams) (*openai.ChatCompletion, error) {
 	metadata := core.ExtractMetadata(ctx, nil)
+
+	if err := c.parent.enforcer.Check(enforcement.NewEvalContext(ctx, string(params.Model), "PERPLEXITY")); err != nil {
+		core.Debug("Chat.Completions.New blocked by enforcement: %v", err)
+		return nil, err
+	}
+
 	requestTime := time.Now()
 
 	resp, err := c.client.Chat.Completions.New(ctx, params)
@@ -204,9 +197,8 @@ func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatComple
 		duration := time.Since(requestTime)
 		payload := metering.NewPayload(metering.OperationChat, string(params.Model), "PERPLEXITY").
 			WithTiming(requestTime, duration).
-			WithError(err.Error()).
 			Build()
-		metering.ApplyMetadata(payload, metadata)
+		metering.ApplyFailedCall(payload, callFailure(err), metadata)
 		c.parent.metering.Send(payload)
 		return nil, err
 	}
@@ -230,6 +222,9 @@ func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatComple
 
 	applyPerplexityCost(payload, cost)
 	metering.ApplyMetadata(payload, metadata)
+	metering.ApplyChatCapture(payload, metadata, func() metering.ChatCapture {
+		return metering.OpenAIChatCapture(params.Messages, chatReply(resp))
+	})
 	c.parent.metering.Send(payload)
 
 	return resp, nil
@@ -237,6 +232,11 @@ func (c *CompletionsInterface) New(ctx context.Context, params openai.ChatComple
 
 func (c *CompletionsInterface) NewStreaming(ctx context.Context, params openai.ChatCompletionNewParams) (*StreamingWrapper, error) {
 	metadata := core.ExtractMetadata(ctx, nil)
+
+	if err := c.parent.enforcer.Check(enforcement.NewEvalContext(ctx, string(params.Model), "PERPLEXITY")); err != nil {
+		core.Debug("Chat.Completions.NewStreaming blocked by enforcement: %v", err)
+		return nil, err
+	}
 
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 
@@ -249,11 +249,13 @@ func (c *CompletionsInterface) NewStreaming(ctx context.Context, params openai.C
 	}
 
 	wrapper := &StreamingWrapper{
-		stream:   stream,
-		metadata: streamMetadata,
+		stream:    stream,
+		metadata:  streamMetadata,
 		startTime: time.Now(),
-		model:    string(params.Model),
-		parent:   c.parent,
+		model:     string(params.Model),
+		parent:    c.parent,
+		params:    params,
+		reply:     metering.ReplyCollectorFor(streamMetadata),
 	}
 
 	return wrapper, nil
@@ -333,6 +335,7 @@ type StreamingWrapper struct {
 	model          string
 	parent         *ReveniumPerplexity
 	mu             sync.Mutex
+	closed         bool
 
 	inputTokens  int64
 	outputTokens int64
@@ -343,15 +346,26 @@ type StreamingWrapper struct {
 	systemFingerprint string
 
 	streamCost *PerplexityCost
+
+	params openai.ChatCompletionNewParams
+	reply  *prompt.ReplyCollector
 }
 
+// Next records each chunk exactly once, so usage, cost and the captured reply do not
+// depend on whether, or how often, the caller reads Current.
 func (sw *StreamingWrapper) Next() bool {
-	return sw.stream.Next()
+	if !sw.stream.Next() {
+		return false
+	}
+	sw.recordChunk(sw.stream.Current())
+	return true
 }
 
 func (sw *StreamingWrapper) Current() openai.ChatCompletionChunk {
-	chunk := sw.stream.Current()
+	return sw.stream.Current()
+}
 
+func (sw *StreamingWrapper) recordChunk(chunk openai.ChatCompletionChunk) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -370,15 +384,18 @@ func (sw *StreamingWrapper) Current() openai.ChatCompletionChunk {
 		sw.streamCost = cost
 	}
 
-	if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-		sw.finishReason = chunk.Choices[0].FinishReason
+	if finishReason := choiceZero(chunk).FinishReason; finishReason != "" {
+		sw.finishReason = finishReason
 	}
 
 	if chunk.SystemFingerprint != "" {
 		sw.systemFingerprint = chunk.SystemFingerprint
 	}
 
-	return chunk
+	sw.reply.Add(chunkReply(chunk))
+	if chunkFinished(chunk) {
+		sw.reply.End()
+	}
 }
 
 func (sw *StreamingWrapper) Err() error {
@@ -386,23 +403,17 @@ func (sw *StreamingWrapper) Err() error {
 }
 
 func (sw *StreamingWrapper) Close() error {
-	err := sw.stream.Close()
-	streamErr := sw.stream.Err()
-	duration := time.Since(sw.startTime)
-
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if streamErr != nil {
-		payload := metering.NewPayload(metering.OperationChat, sw.model, "PERPLEXITY").
-			WithTiming(sw.startTime, duration).
-			WithStreaming(true, 0, nil).
-			WithError(streamErr.Error()).
-			Build()
-		metering.ApplyMetadata(payload, sw.metadata)
-		sw.parent.metering.Send(payload)
-		return err
+	if sw.closed {
+		return nil
 	}
+	sw.closed = true
+
+	err := sw.stream.Close()
+	streamErr := sw.stream.Err()
+	duration := time.Since(sw.startTime)
 
 	timeToFirstToken := int64(0)
 	var completionStartTime *time.Time
@@ -426,8 +437,42 @@ func (sw *StreamingWrapper) Close() error {
 		Build()
 
 	applyPerplexityCost(payload, sw.streamCost)
-	metering.ApplyMetadata(payload, sw.metadata)
+	if streamErr != nil {
+		metering.ApplyFailedCall(payload, callFailure(streamErr), sw.metadata)
+	} else {
+		metering.ApplyMetadata(payload, sw.metadata)
+		metering.ApplyChatCapture(payload, sw.metadata, func() metering.ChatCapture {
+			return metering.OpenAIChatCapture(sw.params.Messages, "").WithStreamedReply(sw.reply)
+		})
+	}
 	sw.parent.metering.Send(payload)
 
 	return err
+}
+
+// chatReply, choiceZero, chunkReply and chunkFinished are copies of those in
+// openai/prompt_capture.go and must change with them; providers may not import each other,
+// and core cannot import the openai-go types they read.
+func chatReply(resp *openai.ChatCompletion) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return resp.Choices[0].Message.Content
+}
+
+func choiceZero(chunk openai.ChatCompletionChunk) openai.ChatCompletionChunkChoice {
+	for _, choice := range chunk.Choices {
+		if choice.Index == 0 {
+			return choice
+		}
+	}
+	return openai.ChatCompletionChunkChoice{}
+}
+
+func chunkReply(chunk openai.ChatCompletionChunk) string {
+	return choiceZero(chunk).Delta.Content
+}
+
+func chunkFinished(chunk openai.ChatCompletionChunk) bool {
+	return choiceZero(chunk).FinishReason != ""
 }

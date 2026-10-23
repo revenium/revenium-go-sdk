@@ -9,29 +9,29 @@ import (
 )
 
 func TestEvaluate_EmptyRulesAllows(t *testing.T) {
-	require.NoError(t, evaluate(nil, EvalContext{SubscriberID: "sub1"}))
+	require.NoError(t, evaluate(ruleSet{}, EvalContext{SubscriberID: "sub1"}))
 }
 
 func TestEvaluate_NonBreachedIsSkipped(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, Name: "not-breached", SubscriberID: "sub1",
+			RuleID: 1, Name: "not-breached", Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
 			Threshold: 100, CurrentValue: 50,
 			Action: ActionBlock, Breached: false,
 		},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "sub1"}))
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}))
 }
 
 func TestEvaluate_BlockRuleReturnsStructuredError(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 42, Name: "monthly-cap", SubscriberID: "sub1",
+			RuleID: 42, Name: "monthly-cap", Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
 			Threshold: 100, CurrentValue: 150, PeriodType: "MONTHLY",
 			Action: ActionBlock, Breached: true,
 		},
 	}
-	err := evaluate(rules, EvalContext{SubscriberID: "sub1"})
+	err := evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"})
 	require.Error(t, err)
 	var ece *ErrCostLimitExceeded
 	require.True(t, errors.As(err, &ece), "expected ErrCostLimitExceeded, got %T", err)
@@ -47,68 +47,104 @@ func TestEvaluate_BlockRuleReturnsStructuredError(t *testing.T) {
 func TestEvaluate_ShadowModeNeverBlocks(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, Name: "shadow", SubscriberID: "sub1",
+			RuleID: 1, Name: "shadow", Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
 			Threshold: 100, CurrentValue: 200,
 			Action: ActionBlock, Breached: true, ShadowMode: true,
 		},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "sub1"}),
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}),
 		"shadowMode rules must never throw — even with action=BLOCK and breached=true")
 }
 
 func TestEvaluate_WarnOnlyDoesNotBlock(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, SubscriberID: "sub1",
+			RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
 			Threshold: 100, CurrentValue: 200,
 			Action: ActionWarnOnly, Breached: true,
 		},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "sub1"}))
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}))
 }
 
 func TestEvaluate_ThrottleDoesNotBlock(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, SubscriberID: "sub1",
+			RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
 			Threshold: 100, CurrentValue: 200,
 			Action: ActionThrottle, Breached: true,
 		},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "sub1"}))
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}))
+}
+
+func TestEvaluate_ActionIsNormalizedBeforeComparison(t *testing.T) {
+	ruleWith := func(action Action) ruleSet {
+		return rulesOf(Rule{
+			RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
+			Threshold: 100, CurrentValue: 200,
+			Action: action, Breached: true,
+		})
+	}
+	caller := EvalContext{SubscriberID: "sub1"}
+
+	for _, action := range []Action{"block", " BLOCK ", "Block"} {
+		err := evaluate(ruleWith(action), caller)
+		var ece *ErrCostLimitExceeded
+		require.True(t, errors.As(err, &ece), "action %q should block, got %v", action, err)
+	}
+	for _, action := range []Action{"warn_only", " Throttle "} {
+		require.NoError(t, evaluate(ruleWith(action), caller), "action %q is observation only", action)
+	}
+}
+
+func TestEvaluate_UnrecognizedActionDoesNotBlock(t *testing.T) {
+	rules := []Rule{
+		{
+			RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")},
+			Threshold: 100, CurrentValue: 200,
+			Action: "PAUSE", Breached: true,
+		},
+	}
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}))
 }
 
 func TestEvaluate_NonMatchingSubscriberIsSkipped(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, SubscriberID: "other",
+			RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "other")},
 			Threshold: 100, CurrentValue: 200,
 			Action: ActionBlock, Breached: true,
 		},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "sub1"}))
+	require.NoError(t, evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"}))
 }
 
-func TestEvaluate_AllEmptyScopeIsSkipped(t *testing.T) {
-	// A rule with every scope field empty would act as a team-wide global
-	// block, which is almost always a misconfiguration. The evaluator skips
-	// these rules instead of letting one bad server payload deny service
-	// across every tenant.
+func TestEvaluate_UnfilteredTeamWideRuleBlocksEveryone(t *testing.T) {
 	rules := []Rule{
 		{RuleID: 1, Threshold: 100, CurrentValue: 200, Action: ActionBlock, Breached: true},
 	}
-	require.NoError(t, evaluate(rules, EvalContext{SubscriberID: "any-sub", Model: "any-model"}))
+	for _, ec := range []EvalContext{
+		{SubscriberEmail: "alice@example.com", Model: "gpt-4.1-nano", Provider: "OPENAI"},
+		{SubscriberID: "sub_bob"},
+		{},
+	} {
+		err := evaluate(rulesOf(rules...), ec)
+		var ece *ErrCostLimitExceeded
+		require.True(t, errors.As(err, &ece), "caller %+v", ec)
+		assert.Equal(t, "1", ece.RuleID)
+	}
 }
 
 func TestEvaluate_PartialScopeMatchesAnyWithinDimension(t *testing.T) {
 	rules := []Rule{
 		{
-			RuleID: 1, Model: "gpt-4o-mini",
+			RuleID: 1, Filters: []Filter{isFilter(DimensionModel, "gpt-4o-mini")},
 			Threshold: 100, CurrentValue: 200,
 			Action: ActionBlock, Breached: true,
 		},
 	}
-	err := evaluate(rules, EvalContext{SubscriberID: "any-sub", Model: "gpt-4o-mini", Provider: "OPENAI"})
+	err := evaluate(rulesOf(rules...), EvalContext{SubscriberID: "any-sub", Model: "gpt-4o-mini", Provider: "OPENAI"})
 	require.Error(t, err)
 	var ece *ErrCostLimitExceeded
 	require.True(t, errors.As(err, &ece))
@@ -116,19 +152,17 @@ func TestEvaluate_PartialScopeMatchesAnyWithinDimension(t *testing.T) {
 
 func TestEvaluate_FirstMatchingBlockWins(t *testing.T) {
 	rules := []Rule{
-		{RuleID: 1, SubscriberID: "sub1", Threshold: 100, CurrentValue: 200,
+		{RuleID: 1, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")}, Threshold: 100, CurrentValue: 200,
 			Action: ActionBlock, Breached: true, Name: "first"},
-		{RuleID: 2, SubscriberID: "sub1", Threshold: 50, CurrentValue: 150,
+		{RuleID: 2, Filters: []Filter{isFilter(DimensionSubscriber, "sub1")}, Threshold: 50, CurrentValue: 150,
 			Action: ActionBlock, Breached: true, Name: "second"},
 	}
-	err := evaluate(rules, EvalContext{SubscriberID: "sub1"})
+	err := evaluate(rulesOf(rules...), EvalContext{SubscriberID: "sub1"})
 	var ece *ErrCostLimitExceeded
 	require.True(t, errors.As(err, &ece))
 	assert.Equal(t, "1", ece.RuleID, "first matching rule should win")
 }
 
-func TestMatches_EmptyFieldIsWildcard(t *testing.T) {
-	r := &Rule{SubscriberID: "sub1"} // ProductName/Model/Provider empty = match any
-	assert.True(t, matches(r, EvalContext{SubscriberID: "sub1", ProductName: "whatever"}))
-	assert.False(t, matches(r, EvalContext{SubscriberID: "other", ProductName: "whatever"}))
+func rulesOf(rules ...Rule) ruleSet {
+	return ruleSet{rules: rules}
 }

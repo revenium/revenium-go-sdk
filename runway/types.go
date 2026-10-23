@@ -16,28 +16,35 @@ const (
 // ImageToVideoRequest represents a request to create an image-to-video task
 type ImageToVideoRequest struct {
 	PromptImage string `json:"promptImage"`          // Base64 encoded image or URL
-	PromptText  string `json:"promptText,omitempty"`  // Optional text prompt
-	Model       string `json:"model,omitempty"`       // Model version (default: gen3a_turbo)
-	Duration    int    `json:"duration,omitempty"`     // Duration in seconds (5 or 10)
-	Ratio       string `json:"ratio,omitempty"`        // Resolution ratio (e.g., "1280:768", "768:1280")
-	Seed        *int   `json:"seed,omitempty"`         // Random seed for reproducibility
-	Watermark   *bool  `json:"watermark,omitempty"`    // Whether to include watermark
+	PromptText  string `json:"promptText,omitempty"` // Optional text prompt
+	Model       string `json:"model,omitempty"`      // Model version (default: gen3a_turbo)
+	Duration    int    `json:"duration,omitempty"`   // Duration in seconds (5 or 10)
+	Ratio       string `json:"ratio,omitempty"`      // Resolution ratio (e.g., "1280:768", "768:1280")
+	Seed        *int   `json:"seed,omitempty"`       // Random seed for reproducibility
+	Watermark   *bool  `json:"watermark,omitempty"`  // Whether to include watermark
 }
 
 // VideoToVideoRequest represents a request to create a video-to-video task
 type VideoToVideoRequest struct {
-	PromptVideo string `json:"promptVideo"`           // Base64 encoded video or URL
-	PromptText  string `json:"promptText,omitempty"`  // Optional text prompt
-	Model       string `json:"model,omitempty"`       // Model version
-	Duration    int    `json:"duration,omitempty"`     // Duration in seconds
-	Seed        *int   `json:"seed,omitempty"`         // Random seed for reproducibility
-	Watermark   *bool  `json:"watermark,omitempty"`    // Whether to include watermark
+	PromptVideo string `json:"promptVideo"`          // Base64 encoded video or URL
+	PromptText  string `json:"promptText,omitempty"` // Optional text prompt
+	Model       string `json:"model,omitempty"`      // Model version
+	Duration    int    `json:"duration,omitempty"`   // Duration in seconds
+	Seed        *int   `json:"seed,omitempty"`       // Random seed for reproducibility
+	Watermark   *bool  `json:"watermark,omitempty"`  // Whether to include watermark
+	// SourceDurationSeconds is the length of the input video. It is billed when Duration is not set,
+	// because the output of a model such as gen4_aleph follows its input and Runway reports no
+	// output length. It is not sent to Runway.
+	SourceDurationSeconds float64 `json:"-"`
 }
 
 // VideoUpscaleRequest represents a request to upscale a video
 type VideoUpscaleRequest struct {
-	PromptVideo string `json:"promptVideo"`           // Base64 encoded video or URL
-	Model       string `json:"model,omitempty"`       // Upscale model version
+	PromptVideo string `json:"promptVideo"`     // Base64 encoded video or URL
+	Model       string `json:"model,omitempty"` // Upscale model version
+	// SourceDurationSeconds is the length of the input video and is required. Runway does not report
+	// the upscaled length, so metering bills this value; it is not sent to Runway.
+	SourceDurationSeconds float64 `json:"-"`
 }
 
 // TaskResponse represents the response when creating a task
@@ -63,14 +70,14 @@ type TaskStatusResponse struct {
 
 // VideoGenerationResult contains the final result of a video generation task
 type VideoGenerationResult struct {
-	ID          string                 `json:"id"`                      // Task ID
-	Status      TaskStatus             `json:"status"`                  // Final status
-	OutputURLs  []string               `json:"outputUrls"`              // Generated video URLs
-	Duration    time.Duration          `json:"duration"`                // Total time taken
-	Model       string                 `json:"model"`                   // Model used
-	Error       *string                `json:"error,omitempty"`         // Error if failed
-	FailureCode *string                `json:"failureCode,omitempty"`   // Failure code if failed
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`      // Request metadata
+	ID          string                 `json:"id"`                    // Task ID
+	Status      TaskStatus             `json:"status"`                // Final status
+	OutputURLs  []string               `json:"outputUrls"`            // Generated video URLs
+	Duration    time.Duration          `json:"duration"`              // Total time taken
+	Model       string                 `json:"model"`                 // Model used
+	Error       *string                `json:"error,omitempty"`       // Error if failed
+	FailureCode *string                `json:"failureCode,omitempty"` // Failure code if failed
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`    // Request metadata
 }
 
 // RunwayErrorResponse represents an error response from the Runway API
@@ -102,26 +109,26 @@ func DefaultPollingConfig() *PollingConfig {
 
 // UsageMetadata represents metadata to be sent with metering data
 type UsageMetadata struct {
-	OrganizationName    string                 `json:"organizationName,omitempty"`
-	ProductName         string                 `json:"productName,omitempty"`
-	TaskType            string                 `json:"taskType,omitempty"`
-	Agent               string                 `json:"agent,omitempty"`
-	SubscriptionID      string                 `json:"subscriptionId,omitempty"`
-	TraceID             string                 `json:"traceId,omitempty"`
+	OrganizationName string `json:"organizationName,omitempty"`
+	ProductName      string `json:"productName,omitempty"`
+	TaskType         string `json:"taskType,omitempty"`
+	Agent            string `json:"agent,omitempty"`
+	SubscriptionID   string `json:"subscriptionId,omitempty"`
+	TraceID          string `json:"traceId,omitempty"`
 	// Distributed tracing fields
-	ParentTransactionID string                 `json:"parentTransactionId,omitempty"`
-	TraceType           string                 `json:"traceType,omitempty"`
-	TraceName           string                 `json:"traceName,omitempty"`
-	TicketID            string                 `json:"ticketId,omitempty"`
-	Environment         string                 `json:"environment,omitempty"`
-	Region              string                 `json:"region,omitempty"`
-	RetryNumber         *int                   `json:"retryNumber,omitempty"`
-	CredentialAlias     string                 `json:"credentialAlias,omitempty"`
-	Subscriber          map[string]interface{} `json:"subscriber,omitempty"`
-	TaskID              string                 `json:"taskId,omitempty"`
-	ResponseQualityScore *float64              `json:"responseQualityScore,omitempty"`
+	ParentTransactionID  string                 `json:"parentTransactionId,omitempty"`
+	TraceType            string                 `json:"traceType,omitempty"`
+	TraceName            string                 `json:"traceName,omitempty"`
+	TicketID             string                 `json:"ticketId,omitempty"`
+	Environment          string                 `json:"environment,omitempty"`
+	Region               string                 `json:"region,omitempty"`
+	RetryNumber          *int                   `json:"retryNumber,omitempty"`
+	CredentialAlias      string                 `json:"credentialAlias,omitempty"`
+	Subscriber           map[string]interface{} `json:"subscriber,omitempty"`
+	TaskID               string                 `json:"taskId,omitempty"`
+	ResponseQualityScore *float64               `json:"responseQualityScore,omitempty"`
 	// Multimodal job identifiers
-	VideoJobID          string                 `json:"videoJobId,omitempty"`
-	AudioJobID          string                 `json:"audioJobId,omitempty"`
-	Custom              map[string]interface{} `json:"custom,omitempty"`
+	VideoJobID string                 `json:"videoJobId,omitempty"`
+	AudioJobID string                 `json:"audioJobId,omitempty"`
+	Custom     map[string]interface{} `json:"custom,omitempty"`
 }

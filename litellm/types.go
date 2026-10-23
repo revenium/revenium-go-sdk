@@ -93,6 +93,8 @@ type TokenUsage struct {
 	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens,omitempty"`
 	PromptTokensDetails      *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails  *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	// Cost is the USD cost the upstream provider reported, which the proxy restates here (xAI's cost_in_usd_ticks, for one).
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 func (u *TokenUsage) CacheCreationTokenCount() int64 {
@@ -111,11 +113,37 @@ func (u *TokenUsage) CacheCreationTokenCount() int64 {
 	return u.PromptTokensDetails.CacheWriteTokens
 }
 
+// ReportedCost is the provider's own cost for the call, or nil when it reported none.
+func (u *TokenUsage) ReportedCost() *float64 {
+	if u == nil || u.Cost == nil || *u.Cost < 0 {
+		return nil
+	}
+	return u.Cost
+}
+
+// CacheCreationByTTL returns the five-minute and one-hour cache writes the
+// provider reported; a bucket it did not report is nil, never 0.
+func (u *TokenUsage) CacheCreationByTTL() (fiveMinute, oneHour *int64) {
+	if u == nil || u.PromptTokensDetails == nil || u.PromptTokensDetails.CacheCreationTokenDetails == nil {
+		return nil, nil
+	}
+	byTTL := u.PromptTokensDetails.CacheCreationTokenDetails
+	return byTTL.Ephemeral5mInputTokens, byTTL.Ephemeral1hInputTokens
+}
+
 // PromptTokensDetails contains details about prompt token usage
 type PromptTokensDetails struct {
-	CachedTokens        int64 `json:"cached_tokens,omitempty"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
-	CacheWriteTokens    int64 `json:"cache_write_tokens,omitempty"`
+	CachedTokens              int64                      `json:"cached_tokens,omitempty"`
+	CacheCreationTokens       int64                      `json:"cache_creation_tokens,omitempty"`
+	CacheWriteTokens          int64                      `json:"cache_write_tokens,omitempty"`
+	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
+}
+
+// CacheCreationTokenDetails is Claude's cache write split by time to live, as
+// LiteLLM passes it on from Anthropic's usage.cache_creation
+type CacheCreationTokenDetails struct {
+	Ephemeral5mInputTokens *int64 `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 // CompletionTokensDetails contains details about completion token usage

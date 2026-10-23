@@ -320,55 +320,37 @@ func TestTransformResponseFromBedrockFormat_PreservesStopReason(t *testing.T) {
 	}
 }
 
-func TestBedrockStreamingWrapper_AccumulatesTokens(t *testing.T) {
-	events := make(chan brtypes.ResponseStream, 3)
-	events <- &brtypes.ResponseStreamMemberChunk{
-		Value: brtypes.PayloadPart{
-			Bytes: []byte(`{"delta":{"type":"content_block_delta","text":"Hello"}}`),
-		},
-	}
-	events <- &brtypes.ResponseStreamMemberChunk{
-		Value: brtypes.PayloadPart{
-			Bytes: []byte(`{"delta":{"stop_reason":"end_turn"},"amazon-bedrock-invocationMetrics":{"inputTokenCount":100,"outputTokenCount":25}}`),
-		},
+func feedInvokeStream(anthropicEvents ...string) *BedrockStreamingWrapper {
+	events := make(chan brtypes.ResponseStream, len(anthropicEvents))
+	for _, event := range anthropicEvents {
+		events <- &brtypes.ResponseStreamMemberChunk{Value: brtypes.PayloadPart{Bytes: []byte(event)}}
 	}
 	close(events)
-
-	wrapper := &BedrockStreamingWrapper{
-		events:  events,
-		modelID: "anthropic.claude-3-5-sonnet",
-	}
-
-	chunks := 0
+	wrapper := &BedrockStreamingWrapper{events: events, modelID: streamedModelID}
 	for wrapper.Next() {
-		chunks++
 	}
-	assert.Equal(t, 2, chunks)
-	assert.Nil(t, wrapper.Err())
+	return wrapper
+}
 
+func TestBedrockStreamingWrapper_AccumulatesTokens(t *testing.T) {
+	wrapper := feedInvokeStream(invokeStreamMessageStartWithoutCache, invokeStreamBlockStart, invokeStreamBlockDelta,
+		invokeStreamBlockStop, invokeStreamOutputOnly, invokeStreamStopWithoutCache)
+
+	assert.Nil(t, wrapper.Err())
 	input, output, total := wrapper.GetAccumulatedTokens()
-	assert.Equal(t, int64(100), input)
-	assert.Equal(t, int64(25), output)
-	assert.Equal(t, int64(125), total)
+	assert.Equal(t, int64(1), input)
+	assert.Equal(t, int64(162), output)
+	assert.Equal(t, int64(163), total)
 	assert.Equal(t, "end_turn", wrapper.GetStopReason())
 }
 
 func TestBedrockStreamingWrapper_AccumulatesCacheTokens(t *testing.T) {
-	events := make(chan brtypes.ResponseStream, 2)
-	events <- &brtypes.ResponseStreamMemberChunk{
-		Value: brtypes.PayloadPart{
-			Bytes: []byte(`{"delta":{"text":"Hi"},"usage":{"input_tokens":50,"output_tokens":10,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}`),
-		},
-	}
-	close(events)
-
-	wrapper := &BedrockStreamingWrapper{events: events, modelID: "test"}
-	for wrapper.Next() {
-	}
+	wrapper := feedInvokeStream(invokeStreamMessageStartWithCache, invokeStreamBlockStart, invokeStreamBlockDelta,
+		invokeStreamBlockStop, invokeStreamOutputOnly, invokeStreamStopWithoutCache)
 
 	creation, read := wrapper.GetCacheTokens()
-	assert.Equal(t, int64(5), creation)
-	assert.Equal(t, int64(30), read)
+	assert.Equal(t, int64(1139), creation)
+	assert.Equal(t, int64(421714), read)
 }
 
 func TestBedrockStreamingWrapper_ZeroTokensWhenNoMetrics(t *testing.T) {

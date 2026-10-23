@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"sync"
 )
 
@@ -71,16 +72,15 @@ func (cm *ClientManager) CloseAll() error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	var errs []error
 	for _, client := range cm.reveniumClients {
-		if err := client.Close(); err != nil {
-			return err
-		}
+		errs = append(errs, client.Close())
 	}
 
 	cm.reveniumClients = make(map[string]*ReveniumOpenAI)
 	cm.azureClients = make(map[string]interface{})
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // GetClientCount returns the number of cached clients

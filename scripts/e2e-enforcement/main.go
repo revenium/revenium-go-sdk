@@ -20,7 +20,7 @@
 //     injected via enforcement httptest. Chat.Completions.New must return
 //     ErrCostLimitExceeded with zero calls to the OpenAI endpoint.
 //
-// Output
+// # Output
 //
 // Writes .e2e-report.md next to itself with pass/fail per phase, then
 // exits 0 if every phase passes or 1 if any fail.
@@ -123,7 +123,8 @@ func phase1LiveWiring() (string, error) {
 // Phase 2 — synthetic BLOCK rule must throw structured error.
 func phase2BlockContract() (string, error) {
 	rule := enforcement.Rule{
-		RuleID: 4242, Name: "e2e-block", SubscriberID: "samuel.combs@revenium.io",
+		RuleID: 4242, Name: "e2e-block",
+		Filters:   subscriberFilter("samuel.combs@revenium.io"),
 		Threshold: 0.01, CurrentValue: 0.0147, PeriodType: "MONTHLY",
 		Action: enforcement.ActionBlock, Breached: true,
 	}
@@ -150,7 +151,8 @@ func phase2BlockContract() (string, error) {
 // Phase 3 — shadow-mode BLOCK rule must NOT throw.
 func phase3ShadowMode() (string, error) {
 	rule := enforcement.Rule{
-		RuleID: 4243, Name: "e2e-shadow", SubscriberID: "samuel.combs@revenium.io",
+		RuleID: 4243, Name: "e2e-shadow",
+		Filters:   subscriberFilter("samuel.combs@revenium.io"),
 		Threshold: 0.01, CurrentValue: 0.0147,
 		Action: enforcement.ActionBlock, Breached: true, ShadowMode: true,
 	}
@@ -205,8 +207,8 @@ func phase5NoContent() (string, error) {
 func phase6OpenAIWrapperBlocks() (string, error) {
 	rule := enforcement.Rule{
 		RuleID: 4244, Name: "e2e-wrapper-block",
-		SubscriberID: "samuel.combs@revenium.io",
-		Threshold:    0.01, CurrentValue: 0.05, PeriodType: "DAILY",
+		Filters:   subscriberFilter("samuel.combs@revenium.io"),
+		Threshold: 0.01, CurrentValue: 0.05, PeriodType: "DAILY",
 		Action: enforcement.ActionBlock, Breached: true,
 	}
 	enforceSrv := ruleServer([]enforcement.Rule{rule})
@@ -274,6 +276,14 @@ func phase6OpenAIWrapperBlocks() (string, error) {
 
 	return fmt.Sprintf("sync+stream blocked pre-call, openai hits=%d, rule=%s",
 		atomic.LoadInt32(&openaiHits), ece.RuleID), nil
+}
+
+func subscriberFilter(email string) []enforcement.Filter {
+	return []enforcement.Filter{{
+		Dimension: enforcement.DimensionSubscriber,
+		Operator:  enforcement.OperatorIs,
+		Value:     email,
+	}}
 }
 
 // ruleServer returns an httptest.Server that serves the given rules in the

@@ -17,16 +17,19 @@ import (
 	"github.com/revenium/revenium-go-sdk/core/resilience"
 )
 
-const jobsBasePath = "/profitstream/v2/api/jobs"
+const (
+	jobsBasePath     = "/profitstream/v2/api/jobs"
+	writeKeyGuidance = "job and outcome calls need a write key (rev_sk_); Revenium always refuses a metering key (rev_mk_) for them. " +
+		"Keep the metering key in REVENIUM_METERING_API_KEY for usage records and give the job client a separate write key, for example from REVENIUM_WRITE_API_KEY"
+)
 
-var sharedHTTPClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-	},
+var sharedHTTPClient = newJobHTTPClient()
+
+// newJobHTTPClient builds the client for job and outcome calls with a fixed
+// 10-second timeout. REVENIUM_API_TIMEOUT covers usage records and tool events
+// only, so this client must not follow it.
+func newJobHTTPClient() *http.Client {
+	return core.NewReveniumHTTPClient(10 * time.Second)
 }
 
 type JobClientConfig struct {
@@ -36,20 +39,57 @@ type JobClientConfig struct {
 }
 
 type JobClient struct {
-	config      JobClientConfig
-	retryConfig *resilience.RetryConfig
+	config         JobClientConfig
+	retryConfig    *resilience.RetryConfig
+	breaker        *resilience.CircuitBreaker
+	releaseBreaker func()
 }
 
+// NewJobClient builds a client for the job and outcome API. It needs a write
+// key (rev_sk_): Revenium refuses a metering key (rev_mk_) on every job call,
+// so one is rejected here instead of failing each call later.
 func NewJobClient(cfg JobClientConfig) (*JobClient, error) {
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.TeamID = strings.TrimSpace(cfg.TeamID)
 	if cfg.APIKey == "" {
-		return nil, core.NewConfigError("metering API key is required", nil)
+		return nil, core.NewConfigError("a write API key (rev_sk_) is required for job and outcome calls", nil)
 	}
+	if err := core.ValidateAPIKeyCharactersFor("JobClientConfig.APIKey", cfg.APIKey); err != nil {
+		return nil, err
+	}
+	if !core.IsValidAPIKeyFormat(cfg.APIKey) {
+		return nil, core.NewConfigError("JobClientConfig.APIKey must be a Revenium write key starting with 'rev_sk_' (older keys start with 'hak_')", nil)
+	}
+	if core.IsMeteringAPIKey(cfg.APIKey) {
+		return nil, core.NewConfigError(writeKeyGuidance, nil)
+	}
+	baseURL, err := core.ResolveValidReveniumBaseURL(cfg.BaseURL, "JobClientConfig.BaseURL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.BaseURL = baseURL
 	if cfg.TeamID == "" {
 		return nil, core.NewConfigError("team ID is required for job operations", nil)
 	}
-	return &JobClient{config: cfg}, nil
+	breaker, release := resilience.AcquireCircuitBreaker(resilience.JobsEndpoint, cfg.BaseURL, cfg.APIKey)
+	return &JobClient{config: cfg, breaker: breaker, releaseBreaker: release}, nil
 }
 
+// Close lets the client's Revenium key forget its outage and Retry-After
+// state once no other client uses the key. Call it when the client is no
+// longer needed; calls made after Close still work.
+func (c *JobClient) Close() {
+	c.releaseBreaker()
+}
+
+// ReportJobOutcome records a job's final outcome. A job has one outcome:
+// a second report returns OutcomeAlreadyReportedError; change it with
+// AmendJobOutcome. A report that times out is sent once more, because a
+// report is safe to repeat: Revenium refuses a second one. When an earlier
+// attempt of this same call failed in a way that may still have stored it,
+// such as a timeout or a 5xx, the job is read back once and the call
+// succeeds if Revenium holds exactly this outcome, unamended. An outcome with
+// Metrics is never confirmed that way, because Revenium does not return them.
 func (c *JobClient) ReportJobOutcome(jobID string, outcome *JobOutcome) (*JobResource, error) {
 	if outcome == nil {
 		return nil, core.NewValidationError("job outcome must not be nil", nil)
@@ -57,23 +97,57 @@ func (c *JobClient) ReportJobOutcome(jobID string, outcome *JobOutcome) (*JobRes
 	if jobID == "" {
 		return nil, core.NewValidationError("job ID must not be empty", nil)
 	}
+	if err := validateMetrics(outcome.Metrics); err != nil {
+		return nil, err
+	}
 
-	path := fmt.Sprintf("%s/%s/outcome", jobsBasePath, url.PathEscape(jobID))
+	path := outcomePath(jobID)
 	var result JobResource
-	err := c.doWithCircuitBreaker(func() error {
-		return c.doRequestWithBody(http.MethodPost, path, nil, outcome, &result)
+	var attempts []error
+	timeouts := &timeoutResendPolicy{}
+	err := c.doRetrying(timeouts, func() error {
+		attempt := c.doRequestWithBody(http.MethodPost, path, nil, outcome, &result)
+		attempts = append(attempts, attempt)
+		timeouts.record(attempt)
+		return attempt
 	})
-	if err != nil {
-		if isConflictError(err) {
-			core.Debug("[JOBS] 409 Conflict - outcome already reported")
-			if parsed, ok := parseConflictBody(err, jobID); ok {
-				return nil, parsed
+	if isConflictError(err) {
+		attemptsBeforeTheConflict := attempts[:len(attempts)-1]
+		if anyMayHaveBeenApplied(attemptsBeforeTheConflict) {
+			if stored, ok := c.jobStoringReport(jobID, outcome); ok {
+				return stored, nil
 			}
-			return nil, nil
 		}
+		return nil, alreadyReportedError(jobID, err)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// AppendOutcomeMetrics adds per-job metric values to a job after its outcome
+// was reported, for values that arrive later. Each key must be declared on the
+// job type with resolution PER_JOB. A value for a key the job already has
+// replaces it and needs a Reason. It is retried only when Revenium answers
+// 429, because a 5xx or a lost connection can arrive after the values were
+// stored. The SDK cannot read per-job metrics back, so to resend after such
+// an error give every entry a Reason: a stored key is then replaced, never
+// counted twice.
+func (c *JobClient) AppendOutcomeMetrics(jobID string, metrics []OutcomeMetric) error {
+	if jobID == "" {
+		return core.NewValidationError("job ID must not be empty", nil)
+	}
+	if len(metrics) == 0 {
+		return core.NewValidationError("metrics must contain at least one entry to append", nil)
+	}
+	if err := validateMetrics(metrics); err != nil {
+		return err
+	}
+	path := outcomePath(jobID) + "/metrics"
+	return c.doWriteNotSafeToRepeat(func() error {
+		return c.doRequestWithBody(http.MethodPost, path, nil, metrics, nil)
+	})
 }
 
 func (c *JobClient) ListJobs(params *ListJobsParams) (*PagedResponse[JobResource], error) {
@@ -106,7 +180,7 @@ func (c *JobClient) ListJobs(params *ListJobsParams) (*PagedResponse[JobResource
 	}
 
 	var raw json.RawMessage
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, jobsBasePath, query, &raw)
 	})
 	if err != nil {
@@ -122,7 +196,7 @@ func (c *JobClient) GetJob(jobID string) (*JobResource, error) {
 
 	path := fmt.Sprintf("%s/%s", jobsBasePath, url.PathEscape(jobID))
 	var result JobResource
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, nil, &result)
 	})
 	if err != nil {
@@ -134,7 +208,7 @@ func (c *JobClient) GetJob(jobID string) (*JobResource, error) {
 func (c *JobClient) GetJobTypes() ([]string, error) {
 	path := jobsBasePath + "/types"
 	var result []string
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, nil, &result)
 	})
 	if err != nil {
@@ -150,7 +224,7 @@ func (c *JobClient) GetJobROI(jobID string) (*JobROIResource, error) {
 
 	path := fmt.Sprintf("%s/%s/roi", jobsBasePath, url.PathEscape(jobID))
 	var result JobROIResource
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, nil, &result)
 	})
 	if err != nil {
@@ -166,7 +240,7 @@ func (c *JobClient) GetJobTransactions(jobID string) (*JobTimelineResource, erro
 
 	path := fmt.Sprintf("%s/%s/transactions", jobsBasePath, url.PathEscape(jobID))
 	var result JobTimelineResource
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, nil, &result)
 	})
 	if err != nil {
@@ -191,7 +265,7 @@ func (c *JobClient) GetConversionFunnel(params *ConversionFunnelParams) (*Conver
 
 	path := jobsBasePath + "/conversion-funnel"
 	var result ConversionFunnelResource
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, query, &result)
 	})
 	if err != nil {
@@ -200,6 +274,13 @@ func (c *JobClient) GetConversionFunnel(params *ConversionFunnelParams) (*Conver
 	return &result, nil
 }
 
+// AmendJobOutcome changes a reported outcome. Set ExpectedEntityVersion to
+// guard against overwriting a change you have not seen: a stale version
+// returns OutcomeAmendConflictError carrying the version Revenium holds. An
+// amendment is not safe to repeat, so it is retried only when Revenium answers
+// 429. After a 5xx or a lost connection, GetJobOutcomeHistory shows whether
+// it was stored: a stored amendment is the latest entry, with your Reason and
+// outcome fields.
 func (c *JobClient) AmendJobOutcome(jobID string, amendment *JobOutcomeAmendment) (*JobResource, error) {
 	if jobID == "" {
 		return nil, core.NewValidationError("job ID must not be empty", nil)
@@ -210,11 +291,16 @@ func (c *JobClient) AmendJobOutcome(jobID string, amendment *JobOutcomeAmendment
 	if strings.TrimSpace(amendment.Reason) == "" {
 		return nil, core.NewValidationError("amendment.Reason is required and must be non-blank", nil)
 	}
+	if amendment.ExpectedEntityVersion != nil && *amendment.ExpectedEntityVersion < 0 {
+		return nil, core.NewValidationError("amendment.ExpectedEntityVersion must be zero or greater", nil)
+	}
+	if err := validateMetrics(amendment.Metrics); err != nil {
+		return nil, err
+	}
 
-	path := fmt.Sprintf("%s/%s/outcome", jobsBasePath, url.PathEscape(jobID))
 	var result JobResource
-	err := c.doWithCircuitBreaker(func() error {
-		return c.doRequestWithBody(http.MethodPatch, path, nil, amendment, &result)
+	err := c.doWriteNotSafeToRepeat(func() error {
+		return c.doRequestWithBody(http.MethodPatch, outcomePath(jobID), nil, amendment, &result)
 	})
 	if err != nil {
 		if isUnprocessableError(err) {
@@ -224,10 +310,7 @@ func (c *JobClient) AmendJobOutcome(jobID string, amendment *JobOutcomeAmendment
 			}
 		}
 		if isConflictError(err) {
-			return nil, &OutcomeAmendConflictError{
-				JobID:   jobID,
-				Message: fmt.Sprintf("concurrent amendment conflict for job %s", jobID),
-			}
+			return nil, amendConflictError(jobID, err)
 		}
 		return nil, err
 	}
@@ -241,7 +324,7 @@ func (c *JobClient) GetJobOutcomeHistory(jobID string) ([]JobOutcomeAmendmentEnt
 
 	path := fmt.Sprintf("%s/%s/outcome/history", jobsBasePath, url.PathEscape(jobID))
 	var result []JobOutcomeAmendmentEntry
-	err := c.doWithCircuitBreaker(func() error {
+	err := c.doReadSafeToRepeat(func() error {
 		return c.doRequest(http.MethodGet, path, nil, &result)
 	})
 	if err != nil {
@@ -250,23 +333,41 @@ func (c *JobClient) GetJobOutcomeHistory(jobID string) ([]JobOutcomeAmendmentEnt
 	return result, nil
 }
 
-func (c *JobClient) doWithCircuitBreaker(fn func() error) error {
-	cb := resilience.GetGlobalCircuitBreaker()
-	retryConfig := c.retryConfig
-	if retryConfig == nil {
-		retryConfig = resilience.DefaultRetryConfig()
+func outcomePath(jobID string) string {
+	return fmt.Sprintf("%s/%s/outcome", jobsBasePath, url.PathEscape(jobID))
+}
+
+// doReadSafeToRepeat runs a read, which is safe to repeat, so it is also
+// retried after a timeout the shared classifier refuses, such as an
+// http.Client timeout, and keeps the same retries on every Go version.
+func (c *JobClient) doReadSafeToRepeat(fn func() error) error {
+	config := c.callRetryConfig()
+	config.RetryAlso = timedOutWaitingForRevenium
+	return resilience.RetryThroughBreaker(c.breaker, nil, config, fn)
+}
+
+func (c *JobClient) doWriteNotSafeToRepeat(fn func() error) error {
+	config := c.callRetryConfig()
+	config.RetryOnly = refusedBeforeApplying
+	return resilience.RetryThroughBreaker(c.breaker, nil, config, fn)
+}
+
+func (c *JobClient) doRetrying(policy *timeoutResendPolicy, fn func() error) error {
+	config := c.callRetryConfig()
+	config.RetryOnly = policy.allowsRetry
+	config.RetryAlso = policy.widensRetry
+	return resilience.RetryThroughBreaker(c.breaker, nil, config, fn)
+}
+
+func (c *JobClient) callRetryConfig() *resilience.RetryConfig {
+	config := resilience.DefaultRetryConfig()
+	if c.retryConfig != nil {
+		*config = *c.retryConfig
 	}
-	return cb.Execute(func() error {
-		return resilience.WithRetry(context.Background(), fn, retryConfig)
-	})
+	return config
 }
 
 func (c *JobClient) buildURL(path string, extra url.Values) string {
-	base := core.NormalizeReveniumBaseURL(c.config.BaseURL)
-	if base == "" {
-		base = core.DefaultReveniumBaseURL
-	}
-
 	query := url.Values{}
 	query.Set("teamId", c.config.TeamID)
 	for k, vs := range extra {
@@ -275,7 +376,7 @@ func (c *JobClient) buildURL(path string, extra url.Values) string {
 		}
 	}
 
-	return base + path + "?" + query.Encode()
+	return c.config.BaseURL + path + "?" + query.Encode()
 }
 
 func (c *JobClient) doRequest(method, path string, query url.Values, out interface{}) error {
@@ -327,26 +428,14 @@ func (c *JobClient) executeAndParse(req *http.Request, out interface{}) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := fmt.Sprintf("job API returned %d: %s", resp.StatusCode, string(body))
-		classification := resilience.ClassifyHTTPResponse(resp.StatusCode, string(body))
-
-		switch classification {
-		case resilience.ClassificationThrottled:
-			revErr := core.NewNetworkError(msg, nil)
-			revErr.StatusCode = resp.StatusCode
-			return revErr.WithDetails("throttled", true)
-		case resilience.ClassificationRetryable:
-			revErr := core.NewMeteringError(msg, nil)
-			revErr.StatusCode = resp.StatusCode
-			return revErr
-		default:
-			revErr := core.NewValidationError(msg, nil)
-			revErr.StatusCode = resp.StatusCode
-			if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity {
-				revErr = revErr.WithDetails("responseBody", string(body))
-			}
-			return revErr
+		revErr := resilience.ResponseError("job", resp.StatusCode, resp.Header, body)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return asKeyRefusal(revErr)
 		}
+		if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity {
+			revErr = revErr.WithDetails("responseBody", string(body))
+		}
+		return revErr
 	}
 
 	if out != nil && len(body) > 0 {
@@ -359,6 +448,14 @@ func (c *JobClient) executeAndParse(req *http.Request, out interface{}) error {
 	return nil
 }
 
+func asKeyRefusal(mapped *core.ReveniumError) *core.ReveniumError {
+	refusal := core.NewAuthError(fmt.Sprintf("%s. Check that the key is a valid write key for this team: %s", mapped.Message, writeKeyGuidance), mapped.Err)
+	refusal.StatusCode = mapped.StatusCode
+	refusal.RetryAfter = mapped.RetryAfter
+	refusal.Details = mapped.Details
+	return refusal
+}
+
 func isConflictError(err error) bool {
 	var revErr *core.ReveniumError
 	return errors.As(err, &revErr) && revErr.StatusCode == http.StatusConflict
@@ -367,25 +464,6 @@ func isConflictError(err error) bool {
 func isUnprocessableError(err error) bool {
 	var revErr *core.ReveniumError
 	return errors.As(err, &revErr) && revErr.StatusCode == http.StatusUnprocessableEntity
-}
-
-func parseConflictBody(err error, jobID string) (*OutcomeAlreadyReportedError, bool) {
-	var revErr *core.ReveniumError
-	if !errors.As(err, &revErr) {
-		return nil, false
-	}
-	bodyStr, ok := revErr.GetDetails()["responseBody"].(string)
-	if !ok || bodyStr == "" {
-		return nil, false
-	}
-	var body conflictResponseBody
-	if json.Unmarshal([]byte(bodyStr), &body) != nil {
-		return nil, false
-	}
-	if body.Error == "" {
-		return nil, false
-	}
-	return newOutcomeAlreadyReportedError(jobID, &body), true
 }
 
 type halPagedResponse[T any] struct {

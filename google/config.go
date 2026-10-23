@@ -79,12 +79,11 @@ func (c *Config) loadFromEnv() error {
 
 	c.Revenium = core.MergeReveniumConfig(c.Revenium, core.LoadReveniumConfig())
 
-	if os.Getenv("REVENIUM_VERTEX_DISABLE") == "1" || os.Getenv("REVENIUM_VERTEX_DISABLE") == "true" {
+	if core.IsEnvFlagSet("REVENIUM_VERTEX_DISABLE") {
 		c.VertexDisabled = true
 	}
 
 	core.InitializeLogger()
-	core.SetGlobalDebug(c.Revenium.Debug)
 	core.Debug("Loading configuration from environment variables")
 
 	return nil
